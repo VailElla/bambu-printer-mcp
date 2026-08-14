@@ -23,7 +23,7 @@ const __dirname = path.dirname(__filename);
 const REPO_ROOT = path.resolve(__dirname, "..");
 const SERVER_ENTRY = path.join(REPO_ROOT, "dist", "index.js");
 const SAMPLE_STL = path.join(REPO_ROOT, "test", "sample_cube.stl");
-const EXPECTED_BAMBU_MODELS = ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s", "h2c"];
+const EXPECTED_BAMBU_MODELS = ["p1s", "p1p", "p2s", "x1c", "x1e", "a1", "a1mini", "h2d", "h2s", "h2c", "x2d"];
 
 async function writeSliced3mfFixture({
   name = "h2-project-filament",
@@ -561,7 +561,7 @@ test("H2 family print_3mf rejects pre-sliced filament jobs without explicit AMS 
   t.after(async () => { await closeTransport(transport); });
 
   await client.connect(transport);
-  for (const bambuModel of ["h2s", "h2d", "h2c"]) {
+  for (const bambuModel of ["h2s", "h2d", "h2c", "x2d"]) {
     const result = await client.callTool({
       name: "print_3mf",
       arguments: {
@@ -621,7 +621,7 @@ test("H2 ams_slots expand into project-level ams_mapping and ams_mapping2", asyn
   }
 });
 
-test("H2C model routes project files through the H2 print path independent of serial prefix", async () => {
+test("dual-nozzle models route project files through the H2 print path independent of serial prefix", async () => {
   const threeMfPath = await writeSliced3mfFixture({ plateFilamentIds: [1] });
   const bambu = new BambuImplementation();
   let uploadedPath = null;
@@ -637,28 +637,33 @@ test("H2C model routes project files through the H2 print path independent of se
   });
 
   try {
-    const result = await bambu.print3mf("127.0.0.1", "01P00TEST0000000", "TEST_TOKEN", {
-      projectName: "h2c-cube",
-      filePath: threeMfPath,
-      bambuModel: "h2c",
-      plateIndex: 0,
-      useAMS: true,
-      amsSlots: [1],
-      bedType: "textured_plate",
-    });
+    for (const { bambuModel, serial } of [
+      { bambuModel: "h2c", serial: "01P00TEST0000000" },
+      { bambuModel: "x2d", serial: "20P9TEST0000000" },
+    ]) {
+      const result = await bambu.print3mf("127.0.0.1", serial, "TEST_TOKEN", {
+        projectName: `${bambuModel}-cube`,
+        filePath: threeMfPath,
+        bambuModel,
+        plateIndex: 0,
+        useAMS: true,
+        amsSlots: [1],
+        bedType: "textured_plate",
+      });
 
-    assert.equal(result.status, "success");
-    assert.equal(uploadedPath, `/${path.basename(threeMfPath)}`);
-    assert.ok(publishedPayload?.print, "H2C should publish a project_file payload");
-    assert.equal(publishedPayload.print.command, "project_file");
-    assert.match(publishedPayload.print.url, /^ftp:\/\/\//);
-    assert.deepEqual(publishedPayload.print.ams_mapping, [-1, 1, -1, -1]);
-    assert.deepEqual(publishedPayload.print.ams_mapping2, [
-      { ams_id: 255, slot_id: 255 },
-      { ams_id: 0, slot_id: 1 },
-      { ams_id: 255, slot_id: 255 },
-      { ams_id: 255, slot_id: 255 },
-    ]);
+      assert.equal(result.status, "success");
+      assert.equal(uploadedPath, `/${path.basename(threeMfPath)}`);
+      assert.ok(publishedPayload?.print, `${bambuModel} should publish a project_file payload`);
+      assert.equal(publishedPayload.print.command, "project_file");
+      assert.match(publishedPayload.print.url, /^ftp:\/\/\//);
+      assert.deepEqual(publishedPayload.print.ams_mapping, [-1, 1, -1, -1]);
+      assert.deepEqual(publishedPayload.print.ams_mapping2, [
+        { ams_id: 255, slot_id: 255 },
+        { ams_id: 0, slot_id: 1 },
+        { ams_id: 255, slot_id: 255 },
+        { ams_id: 255, slot_id: 255 },
+      ]);
+    }
   } finally {
     fs.rmSync(threeMfPath, { force: true });
   }
@@ -881,12 +886,12 @@ test("camera_snapshot routes H2 series through RTSP (verified live on Parker H2S
   bambu.fetchRtspCameraFrame = async () => { rtspCalls++; return fakeJpeg; };
   bambu.fetchTcpCameraFrame = async () => { tcpCalls++; return fakeJpeg; };
 
-  for (const model of ["h2", "h2s", "h2d", "h2c", "h2dpro"]) {
+  for (const model of ["h2", "h2s", "h2d", "h2c", "h2dpro", "x2d"]) {
     const out = await bambu.cameraSnapshot("127.0.0.1", "S", "T", { bambuModel: model });
     assert.equal(out.status, "success", `${model} should succeed via RTSP`);
     assert.equal(out.transport, "rtsps-322", `${model} transport should be rtsps-322`);
   }
-  assert.equal(rtspCalls, 5, "RTSP path should run once per H2 variant");
+  assert.equal(rtspCalls, 6, "RTSP path should run once per H2/X2D variant");
   assert.equal(tcpCalls, 0, "TCP-on-6000 path should not run for H2");
 });
 

@@ -95,8 +95,8 @@ export declare class BambuImplementation {
      *     [16..16+payloadSize] JPEG (FF D8 ... FF D9)
      *
      * Verified models per upstream docs: A1, A1 mini, P1S, P1P. X1/X1C/X1E
-     * and P2S use RTSP on port 322 instead. H2/H2S/H2D/H2C
-     * are not documented; we fail fast rather than guess at the protocol.
+     * and P2S use RTSP on port 322 instead. H2/H2S/H2D/H2C/X2D
+     * use the same RTSP path.
      *
      * Read-only; no confirm gate. Default 8s timeout for cold-start latency.
      */
@@ -130,7 +130,7 @@ export declare class BambuImplementation {
     }>;
     /**
      * Pull a single JPEG frame from the printer's RTSP/RTSPS stream using
-     * ffmpeg. Used for X1, P2S, and H2 series.
+     * ffmpeg. Used for X1, P2S, H2-family printers, and X2D.
      *
      * URL pattern verified against HA bambulab's models.py example:
      *   rtsps://bblp:<access_code>@<host>:322/streaming/live/1

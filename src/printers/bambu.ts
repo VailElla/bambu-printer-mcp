@@ -42,6 +42,7 @@ const CLIENT_CREDS = loadClientCreds();
 const COMMAND_SETTLE_MS = 300;
 
 const MODEL_ID_TO_NAME: Record<string, string> = {
+  N6: "X2D",
   O1C: "H2C",
   O1C2: "H2C",
   O1D: "H2D",
@@ -56,7 +57,7 @@ const MODEL_ID_TO_NAME: Record<string, string> = {
   C13: "X1E",
 };
 
-const H2_MODEL_NAMES = new Set(["h2", "h2c", "h2d", "h2dpro", "h2d pro", "h2s"]);
+const H2_MODEL_NAMES = new Set(["h2", "h2c", "h2d", "h2dpro", "h2d pro", "h2s", "x2d"]);
 
 function isH2ModelName(model: unknown): boolean {
   return H2_MODEL_NAMES.has(String(model ?? "").trim().toLowerCase().replace(/\s+/g, " "));
@@ -545,7 +546,9 @@ export class BambuImplementation {
           totalLayers: data.total_layer_num || 0,
         },
         ams: data.ams || null,
-        model: resolveModelName(data),
+        model: resolveModelName(data) !== "Unknown"
+          ? resolveModelName(data)
+          : (process.env.BAMBU_MODEL || process.env.BAMBU_PRINTER_MODEL || "Unknown").toUpperCase(),
         serial,
         raw: data,
       };
@@ -1222,8 +1225,8 @@ export class BambuImplementation {
    *     [16..16+payloadSize] JPEG (FF D8 ... FF D9)
    *
    * Verified models per upstream docs: A1, A1 mini, P1S, P1P. X1/X1C/X1E
-   * and P2S use RTSP on port 322 instead. H2/H2S/H2D/H2C
-   * are not documented; we fail fast rather than guess at the protocol.
+   * and P2S use RTSP on port 322 instead. H2/H2S/H2D/H2C/X2D
+   * use the same RTSP path.
    *
    * Read-only; no confirm gate. Default 8s timeout for cold-start latency.
    */
@@ -1265,7 +1268,7 @@ export class BambuImplementation {
     // P1/A1 series still use the proprietary TCP-on-6000 framed JPEG path
     // (per https://github.com/Doridian/OpenBambuAPI/blob/main/video.md).
     const TCP_CAMERA_MODELS = new Set(["a1", "a1mini", "p1s", "p1p"]);
-    // X1, P2S, AND H2 (H2S/H2D/H2C) all use RTSP on port 322. The
+    // X1, P2S, H2 (H2S/H2D/H2C), and X2D all use RTSP on port 322. The
     // OpenBambuAPI doc only mentions X1/P2S, but the HA bambulab
     // integration's models.py shows the printer reports its own
     // `ipcam.rtsp_url` for these models, and Parker (H2S) rejects the
@@ -1273,7 +1276,7 @@ export class BambuImplementation {
     // see PROGRESS.md "H2 probe results").
     const RTSP_MODELS = new Set([
       "x1", "x1c", "x1carbon", "x1e", "p2s",
-      "h2", "h2s", "h2d", "h2c", "h2dpro",
+      "h2", "h2s", "h2d", "h2c", "h2dpro", "x2d",
     ]);
 
     if (!model) {
@@ -1326,7 +1329,7 @@ export class BambuImplementation {
 
   /**
    * Pull a single JPEG frame from the printer's RTSP/RTSPS stream using
-   * ffmpeg. Used for X1, P2S, and H2 series.
+   * ffmpeg. Used for X1, P2S, H2-family printers, and X2D.
    *
    * URL pattern verified against HA bambulab's models.py example:
    *   rtsps://bblp:<access_code>@<host>:322/streaming/live/1
