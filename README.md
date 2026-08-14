@@ -24,7 +24,7 @@ This fork adds a substantial set of printer control tools beyond the upstream `m
 - **AMS auto-match by RFID** (`auto_match_ams` on `print_3mf`) — resolves sliced 3MF filament requirements against live AMS inventory. Handles same-SKU different-color filaments. Dry-run with `resolve_3mf_ams_slots`.
 - **Structured AMS inventory** (`get_printer_filaments`) — per-tray display names, profile resolution tier (`exact-model-nozzle`/`model`/`generic`/`unresolved`), match confidence, and a summary with recommended auto-slice filament.
 - **AMS settle-time retry** — transparently retries when AMS data hasn't arrived on the first MQTT push from an idle printer.
-- **Camera snapshot** (`camera_snapshot`) — JPEG from the chamber camera. TCP-on-6000 for A1/P1S/P1P, RTSP via ffmpeg for X1/P2S/H2 series.
+- **Camera snapshot** (`camera_snapshot`) — JPEG from the chamber camera. TCP-on-6000 for A1/P1S/P1P, RTSP via ffmpeg for X1/P2S/H2/X2D.
 - **Pause / resume** (`pause_print`, `resume_print`) — alongside the existing `cancel_print`.
 - **Skip objects** (`skip_objects`) — skip specific object IDs during a running multi-object print. IDs from `list_3mf_plate_objects`.
 - **HMS diagnostics** (`printer://{host}/hms` MCP resource) — read-only error summary with automatic settle retry.

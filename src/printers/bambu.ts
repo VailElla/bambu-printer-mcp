@@ -117,6 +117,18 @@ function resolveModelName(data: Record<string, any>): string {
   );
 }
 
+function resolveStatusModel(data: Record<string, any>): string {
+  const resolved = resolveModelName(data);
+  if (resolved !== "Unknown") return resolved;
+
+  // Some X2D firmware reports an empty model_id in push_status. The model
+  // env var is already required for safe print/slice routing, so use it only
+  // as a display fallback when the device report has no model information.
+  const configuredModel =
+    process.env.BAMBU_PRINTER_MODEL?.trim() || process.env.BAMBU_MODEL?.trim() || "";
+  return configuredModel ? configuredModel.toUpperCase() : "Unknown";
+}
+
 async function invokeWithoutAck(printer: BambuClient, command: { invoke(client: BambuClient): Promise<void> }) {
   await command.invoke(printer);
   await sleep(COMMAND_SETTLE_MS);
@@ -546,9 +558,7 @@ export class BambuImplementation {
           totalLayers: data.total_layer_num || 0,
         },
         ams: data.ams || null,
-        model: resolveModelName(data) !== "Unknown"
-          ? resolveModelName(data)
-          : (process.env.BAMBU_MODEL || process.env.BAMBU_PRINTER_MODEL || "Unknown").toUpperCase(),
+        model: resolveStatusModel(data),
         serial,
         raw: data,
       };

@@ -4,8 +4,8 @@
 
 | Use case | Path | Status |
 |---|---|---|
-| Single-color slice (any BBL printer) | `BAMBU_CLI_FLATTEN=true` → MCP slices via CLI | ✅ Works (verified H2S, H2D, X1C, P1S on 02.06.01.55). H2C requires Bambu Studio 2.4.0+ and `BAMBU_MODEL=h2c`. |
-| Multi-color slice on H2-family printers | None — **upstream BambuStudio CLI is blocked for the verified H2D multi-color path** | ❌ See "Multi-color CLI gap" below |
+| Single-color slice (any BBL printer) | `BAMBU_CLI_FLATTEN=true` → MCP slices via CLI | ✅ Works (verified H2S, H2D, X2D, X1C, P1S on 02.06.01.55). H2C requires Bambu Studio 2.4.0+ and `BAMBU_MODEL=h2c`. |
+| Multi-color slice on H2-family/X2D printers | None — **upstream BambuStudio CLI is blocked for the verified dual-extruder path** | ❌ See "Multi-color CLI gap" below |
 | Pre-sliced `.gcode.3mf` → printer | MCP `print_3mf` | ✅ Works (verified live on Kingpin H2D) |
 | Anything else | Pre-slice in Bambu Studio GUI, hand to `print_3mf` | ✅ Works always |
 
@@ -30,8 +30,8 @@ calling the CLI — a workaround for several upstream bugs in BambuStudio's
 CLI mode (issues
 [#9636](https://github.com/bambulab/BambuStudio/issues/9636) and
 [#9968](https://github.com/bambulab/BambuStudio/issues/9968)). Verified
-on H2S, H2D, X1C, and P1S with stock BBL profiles. This verification is
-single-color only; it does not cover H2D two-color/multi-material slicing.
+on H2S, H2D, X2D, X1C, and P1S with stock BBL profiles. This verification is
+single-color only; it does not cover H2D/X2D two-color/multi-material slicing.
 H2C is accepted as `BAMBU_MODEL=h2c`; use Bambu Studio 2.4.0 or newer for
 the H2C printer preset and do not substitute `h2d`.
 
@@ -40,7 +40,7 @@ runs the MCP. Default remains Path A so behavior is backward-compatible.
 
 ## Multi-color CLI gap (2026-04-28)
 
-`BambuStudio --slice` is still blocked on H2D dual-extruder, multi-color
+`BambuStudio --slice` is still blocked on H2D/X2D dual-extruder, multi-color
 projects. Version `02.06.00.51` SIGSEGVed in the slicer setup path, and
 version `02.06.01.55` still fails the same repro: exported-project CLI slicing
 reaches `Detect overhangs for auto-lift` then reports `No valid nozzle found.
@@ -52,7 +52,7 @@ with repro files attached.
 What this means in practice:
 
 - **Single-color slicing works.** The `BAMBU_CLI_FLATTEN=true` path slices
-  H2S/H2D/X1C/P1S models cleanly and produces printable `.gcode.3mf` output.
+  H2S/H2D/X2D/X1C/P1S models cleanly and produces printable `.gcode.3mf` output.
   H2C follows the H2 print path but needs a Bambu Studio install that includes
   the `Bambu Lab H2C <nozzle> nozzle` preset.
 - **Multi-color slicing must use the GUI.** Open the model in Bambu Studio,
@@ -100,7 +100,7 @@ When `BAMBU_CLI_FLATTEN=true`, the MCP:
    `--load-settings` / `--load-filaments`.
 
 Implementation: [`src/slicer/profile-flatten.ts`](../src/slicer/profile-flatten.ts).
-Smoke test: `node scripts/test-cli-slice.mjs --model h2s|h2d|h2c|x1c|p1s`.
+Smoke test: `node scripts/test-cli-slice.mjs --model h2s|h2d|h2c|x2d|x1c|p1s`.
 
 ## Why we couldn't slice in-process before
 
@@ -140,7 +140,7 @@ That's the signal: the file is a model `.3mf`, not a sliced `.gcode.3mf`. Re-sli
 ## Slicing recipe (Bambu Studio)
 
 1. Open Bambu Studio, load the mesh.
-2. Pick the **printer profile that matches the target machine** (H2S, H2D, H2C, X1C, P1S, A1, ...). The start g-code differs per series; a plate sliced for X1 will heat-soak wrong on H2, and an H2C should not be treated as H2D.
+2. Pick the **printer profile that matches the target machine** (H2S, H2D, H2C, X2D, X1C, P1S, A1, ...). The start g-code differs per series; a plate sliced for X1 will heat-soak wrong on H2/X2D, and an H2C should not be treated as H2D.
 3. Pick the **filament** in the slot you actually have it loaded in (AMS unit + tray). The plate's `filament_ids` is the lookup the MCP uses to build `ams_mapping`.
 4. Slice the plate.
 5. **File → Export → Export plate sliced file** → save as `something.gcode.3mf`.
@@ -157,7 +157,7 @@ The MCP picks the right MQTT command based on printer model:
 | Series  | Command for `.gcode.3mf` | Notes |
 |---------|--------------------------|-------|
 | P1 / A1 / X1 | `gcode_file`         | `project_file` returns `405004002` on these firmwares for `.gcode.3mf`. |
-| H2S / H2D / H2C | `project_file`    | `gcode_file` not supported; firmware reads `Metadata/plate_<n>.gcode` from the zip directly. |
+| H2S / H2D / H2C / X2D | `project_file`    | `gcode_file` not supported; firmware reads `Metadata/plate_<n>.gcode` from the zip directly. |
 
 You don't need to do anything for this — `print3mf()` branches on model. It
 matters only when debugging: if you see `405004002`, you're on P1/A1/X1 and

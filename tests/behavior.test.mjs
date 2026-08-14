@@ -364,6 +364,42 @@ test("printer model safety: schema requires bambu_model, rejects missing/invalid
   }
 });
 
+test("printer status maps the Bambu Studio N6 model id to X2D", async () => {
+  const bambu = new BambuImplementation();
+  bambu.printerStore = {
+    waitForInitialReport: async () => ({ gcode_state: "IDLE", model_id: "N6" }),
+  };
+  bambu.getPrinter = async () => ({
+    data: { gcode_state: "IDLE", model_id: "N6" },
+    publish: async () => {},
+  });
+
+  const status = await bambu.getStatus("127.0.0.1", "TEST_SERIAL", "TEST_TOKEN");
+  assert.equal(status.model, "X2D");
+});
+
+test("printer status falls back to the configured model when firmware omits model_id", async () => {
+  const previousModel = process.env.BAMBU_PRINTER_MODEL;
+  process.env.BAMBU_PRINTER_MODEL = "x2d";
+
+  try {
+    const bambu = new BambuImplementation();
+    bambu.printerStore = {
+      waitForInitialReport: async () => ({ gcode_state: "IDLE", model_id: "" }),
+    };
+    bambu.getPrinter = async () => ({
+      data: { gcode_state: "IDLE", model_id: "" },
+      publish: async () => {},
+    });
+
+    const status = await bambu.getStatus("127.0.0.1", "TEST_SERIAL", "TEST_TOKEN");
+    assert.equal(status.model, "X2D");
+  } finally {
+    if (previousModel === undefined) delete process.env.BAMBU_PRINTER_MODEL;
+    else process.env.BAMBU_PRINTER_MODEL = previousModel;
+  }
+});
+
 test("3MF AMS requirement analysis maps plate filament_ids to slice_info tray_info_idx", async () => {
   const fixture = path.join(REPO_ROOT, "tests/fixtures/h2d_gui_sliced");
   const zip = new JSZip();
