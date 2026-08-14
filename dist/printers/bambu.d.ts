@@ -136,12 +136,15 @@ export declare class BambuImplementation {
      *   rtsps://bblp:<access_code>@<host>:322/streaming/live/1
      *
      * ffmpeg invocation:
-     *   ffmpeg -rtsp_transport tcp -i <url> -frames:v 1 -f image2 -c:v mjpeg -y <out>
+     *   ffmpeg -tls_verify 0 -rtsp_transport tcp -i <url> -frames:v 1 -f image2 -c:v mjpeg -y <out>
      *
-     * -rtsp_transport tcp avoids UDP NAT/firewall issues. -frames:v 1
-     * makes ffmpeg exit as soon as one frame lands. -y overwrites the temp
-     * file. The Bambu printer presents a self-signed cert; ffmpeg's TLS
-     * layer accepts that by default (no host verification).
+     * -tls_verify 0 accepts the printer's self-signed certificate. This is
+     * consistent with the existing local-device TLS/FTPS paths, which do not
+     * have a public CA chain or hostname that ffmpeg can validate. The
+     * connection is still encrypted and remains scoped to the configured
+     * printer host. -rtsp_transport tcp avoids UDP NAT/firewall issues.
+     * -frames:v 1 makes ffmpeg exit as soon as one frame lands. -y overwrites
+     * the temp file.
      */
     private fetchRtspCameraFrame;
     /**

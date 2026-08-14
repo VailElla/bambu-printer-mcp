@@ -1664,10 +1664,12 @@ test("empty slicer_path preserves env fallback without executable opt-in", async
 test("camera_snapshot uses trusted FFMPEG_PATH without opening per-call selectors", async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "trusted-ffmpeg-path-"));
   const fakeFfmpeg = path.join(tempDir, "fake-ffmpeg.mjs");
+  const argsPath = path.join(tempDir, "ffmpeg-args.json");
   fs.writeFileSync(
     fakeFfmpeg,
     `#!/usr/bin/env node
 import fs from "node:fs";
+fs.writeFileSync(${JSON.stringify(argsPath)}, JSON.stringify(process.argv.slice(2)));
 fs.writeFileSync(process.argv.at(-1), Buffer.from([0xff, 0xd8, 0x00, 0x11, 0xff, 0xd9]));
 `,
     { mode: 0o755 }
@@ -1701,6 +1703,10 @@ fs.writeFileSync(process.argv.at(-1), Buffer.from([0xff, 0xd8, 0x00, 0x11, 0xff,
   });
   assert.equal(result.isError, undefined);
   assert.equal(parseJsonResult(result).transport, "rtsps-322");
+  const ffmpegArgs = JSON.parse(fs.readFileSync(argsPath, "utf8"));
+  const tlsVerifyIndex = ffmpegArgs.indexOf("-tls_verify");
+  assert.notEqual(tlsVerifyIndex, -1, "RTSP should explicitly handle the printer's self-signed TLS certificate");
+  assert.equal(ffmpegArgs[tlsVerifyIndex + 1], "0");
 });
 
 test("stdio transport: initialize, list tools, call success + structured failure", async (t) => {
