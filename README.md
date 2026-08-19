@@ -170,7 +170,7 @@ npm link
 Create a `.env` file in the directory where you run the server, or pass environment variables directly in your MCP client config. All printer connection variables can also be passed as tool arguments on a per-call basis, which is useful when working with multiple printers.
 
 ```env
-# --- Bambu printer connection (required for all printer tools) ---
+# --- Bambu printer connection (required for local printer tools) ---
 PRINTER_HOST=192.168.1.100        # IP address of your Bambu printer on the local network
 BAMBU_SERIAL=01P00A123456789      # Printer serial number (see Finding Your Serial Number below)
 BAMBU_TOKEN=your_access_token     # LAN access token from printer touchscreen
@@ -195,6 +195,7 @@ TEMP_DIR=/tmp/bambu-mcp-temp      # Directory for intermediate files. Created au
 
 # --- MCP transport ---
 MCP_TRANSPORT=stdio               # Options: stdio (default), streamable-http
+BAMBU_DEFAULT_CONNECTION_MODE=    # Optional: bambu_connect, bambu_native, bambu_network, or lan_mqtt_ftps
 
 # --- Streamable HTTP transport (only used when MCP_TRANSPORT=streamable-http) ---
 MCP_HTTP_HOST=127.0.0.1
@@ -223,6 +224,8 @@ BLENDER_MCP_BRIDGE_COMMAND=       # Shell command to invoke your Blender MCP bri
 | `SLICER_PROFILE` | | No | Path to a slicer profile or config file |
 | `TEMP_DIR` | `./temp` | No | Directory for intermediate files |
 | `MCP_TRANSPORT` | `stdio` | No | Transport mode: `stdio` or `streamable-http` |
+| `BAMBU_DEFAULT_CONNECTION_MODE` | | No | Default `print_3mf` route. `bambu_connect` hands the printable file to the signed-in Bambu Connect app without starting a print. |
+| `BAMBU_NATIVE_HELPER` | | No | Optional path to the macOS `bambu-native-print` helper; otherwise the repository-local `native/bambu-native-print` is used. |
 | `MCP_HTTP_HOST` | `127.0.0.1` | No | HTTP bind address (HTTP transport only) |
 | `MCP_HTTP_PORT` | `3000` | No | HTTP port (HTTP transport only) |
 | `MCP_HTTP_PATH` | `/mcp` | No | HTTP endpoint path (HTTP transport only) |
@@ -761,6 +764,19 @@ List files stored on the printer's SD card. Scans the `cache/`, `timelapse/`, an
   "bambu_token": "your_access_token"
 }
 ```
+
+#### bambu_connect_import_file
+
+Hand a local G-code or sliced 3MF file to the signed-in Bambu Connect desktop app through its official `bambu-connect://import-file` URL scheme. This works with the printer in cloud mode and does not require LAN-only mode. Bambu Connect remains the final place to select the printer/plate and start the print.
+
+```json
+{
+  "file_path": "/Users/yourname/Downloads/part.gcode.3mf",
+  "name": "part"
+}
+```
+
+For X2D, `BAMBU_DEFAULT_CONNECTION_MODE=bambu_native` uses the scriptable Bambu Studio local networking plug-in and eMMC tunnel by default. Build the optional macOS helper once with `npm run build:native`; it dynamically loads the plug-in from Bambu Connect or Bambu Studio and does not bundle proprietary plug-in code. Use `connection_mode: "bambu_connect"` only when a cloud-mode handoff is intentionally needed; an X2D `lan_mqtt_ftps` request is automatically redirected to the native route because the firmware rejects the legacy FTPS upload. The helper installs the device certificate during the connection handshake and retries one initial `-4030` encrypted publish after the certificate exchange; it refuses unconfirmed native print invocations and does not retry indefinitely.
 
 #### camera_snapshot
 

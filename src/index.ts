@@ -24,6 +24,8 @@ import {
   type SlicerType,
 } from "./stl/stl-manipulator.js";
 import { BambuNetworkBridge, type BambuNetworkBridgeOptions } from "./bambu-network-bridge.js";
+import { printWithBambuNative } from "./bambu-native.js";
+import { importFileViaBambuConnect } from "./bambu-connect.js";
 import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
 import type { ThreeMFAmsRequirements } from "./types.js";
@@ -43,6 +45,8 @@ const DEFAULT_BAMBU_MODEL =
   process.env.BAMBU_PRINTER_MODEL?.trim().toLowerCase() ||
   process.env.BAMBU_MODEL?.trim().toLowerCase() ||
   "";
+const DEFAULT_BAMBU_CONNECTION_MODE =
+  process.env.BAMBU_DEFAULT_CONNECTION_MODE?.trim().toLowerCase() || "";
 const DEFAULT_BED_TYPE = process.env.BED_TYPE?.trim().toLowerCase() || "textured_plate";
 const DEFAULT_NOZZLE_DIAMETER = process.env.NOZZLE_DIAMETER?.trim() || "0.4";
 
@@ -854,6 +858,16 @@ function stringifyBridgeJson(value: unknown): string | undefined {
   return JSON.stringify(value);
 }
 
+function nativeAmsMapping2(mapping: number[] | undefined): string | undefined {
+  if (!mapping || mapping.length === 0) return undefined;
+  return JSON.stringify(mapping.map((value) => {
+    if (value < 0 || value === 255) return { ams_id: 255, slot_id: 255 };
+    if (value === 254) return { ams_id: 254, slot_id: 254 };
+    if (value >= 128) return { ams_id: 128, slot_id: value - 128 };
+    return { ams_id: Math.floor(value / 4), slot_id: value % 4 };
+  }));
+}
+
 function redactPrintParams(params: Record<string, unknown>): Record<string, unknown> {
   return {
     ...params,
@@ -1463,6 +1477,161 @@ class BambuPrinterMCPServer {
       useAMS,
       amsMapping: finalAmsMapping ?? finalAmsSlots,
       params: redactPrintParams(params),
+    };
+  }
+
+  private async handoff3mfViaBambuConnect(
+    args: Record<string, any>
+  ): Promise<Record<string, unknown>> {
+    if (!args?.three_mf_path) {
+      throw new Error("Missing required parameter: three_mf_path");
+    }
+
+    const printModel = await this.resolveBambuModel(args?.bambu_model as string | undefined);
+    const printBedType = resolveBedType(args?.bed_type as string | undefined);
+    const printNozzle = String(args?.nozzle_diameter || DEFAULT_NOZZLE_DIAMETER);
+    const printPreset = BAMBU_MODEL_PRESETS[printModel]?.(printNozzle);
+    const plateIndex = args?.plate_index !== undefined ? Number(args.plate_index) : 0;
+
+    if (!Number.isInteger(plateIndex) || plateIndex < 0) {
+      throw new Error("plate_index must be a non-negative integer.");
+    }
+
+    const { threeMFPath, autoSliced } = await this.ensurePrintableThreeMFPath(
+      args,
+      printModel,
+      printPreset,
+      printBedType
+    );
+    const threeMfFilename = path.basename(threeMFPath);
+    const projectName = String(
+      args?.project_name || threeMfFilename.replace(/\.3mf$/i, "")
+    );
+    const handoff = await importFileViaBambuConnect({
+      filePath: threeMFPath,
+      name: projectName,
+      version: args?.version !== undefined ? String(args.version) : undefined,
+    });
+
+    return {
+      ...handoff,
+      autoSliced,
+      plateIndex,
+      printer_model: printModel,
+      bed_type: printBedType,
+      note: "The printable file was handed to Bambu Connect. Check the selected printer and plate in Bambu Connect before starting; no print command was sent by this MCP route.",
+    };
+  }
+
+  private async print3mfViaBambuNative(
+    args: Record<string, any>,
+    host: string,
+    bambuSerial: string,
+    bambuToken: string
+  ): Promise<Record<string, unknown>> {
+    if (!args?.three_mf_path) {
+      throw new Error("Missing required parameter: three_mf_path");
+    }
+    if (!bambuSerial || !bambuToken) {
+      throw new Error("Bambu serial number and access token are required for the native Bambu Studio route.");
+    }
+
+    const printModel = await this.resolveBambuModel(args?.bambu_model as string | undefined);
+    const printBedType = resolveBedType(args?.bed_type as string | undefined);
+    const printNozzle = String(args?.nozzle_diameter || DEFAULT_NOZZLE_DIAMETER);
+    const printPreset = BAMBU_MODEL_PRESETS[printModel]?.(printNozzle);
+    const plateIndex = args?.plate_index !== undefined ? Number(args.plate_index) : 0;
+    if (!Number.isInteger(plateIndex) || plateIndex < 0) {
+      throw new Error("plate_index must be a non-negative integer.");
+    }
+
+    const { threeMFPath, autoSliced } = await this.ensurePrintableThreeMFPath(
+      args,
+      printModel,
+      printPreset,
+      printBedType
+    );
+    const { useAMS, finalAmsMapping, finalAmsSlots } = await this.resolveAmsPrintSettings(
+      threeMFPath,
+      args,
+      host,
+      bambuSerial,
+      bambuToken,
+      printModel,
+      printNozzle
+    );
+
+    let nativeMapping = finalAmsMapping;
+    if (!nativeMapping && finalAmsSlots && finalAmsSlots.length > 0) {
+      const requirements = await analyze3MFAmsRequirements(threeMFPath, plateIndex);
+      const mappingLength = Math.max(
+        1,
+        ...requirements.usedFilamentPositions.map((position) => position + 1)
+      );
+      nativeMapping = Array<number>(mappingLength).fill(-1);
+      requirements.usedFilamentPositions.forEach((position, index) => {
+        nativeMapping![position] = finalAmsSlots[index] ?? -1;
+      });
+    }
+    if (H2_BAMBU_MODELS.has(printModel) && args?.use_ams !== false && !nativeMapping && !args?.ams_mapping2) {
+      const requirements = await analyze3MFAmsRequirements(threeMFPath, plateIndex);
+      if (requirements.usedFilamentPositions.length > 0) {
+        throw new Error(
+          `H2 ${printModel.toUpperCase()} native jobs with declared filaments require ams_slots, ams_mapping, or auto_match_ams: true. Plate uses project filament positions ${JSON.stringify(requirements.usedFilamentPositions)}.`
+        );
+      }
+    }
+
+    const currentStatus = await this.bambu.getStatus(host, bambuSerial, bambuToken);
+    if (!currentStatus.connected) {
+      throw new Error("X2D is not connected; refusing to start a native print.");
+    }
+    const currentState = String(
+      (currentStatus as any).status || (currentStatus as any).raw?.gcode_state || ""
+    ).trim().toUpperCase();
+    if (["RUNNING", "PAUSE", "PAUSED", "PREPARE", "SLICING"].includes(currentState)) {
+      throw new Error(`X2D already has an active print (${currentState}); native route will not replace it.`);
+    }
+
+    // The preflight status uses the direct bambu-node MQTT client. Release it
+    // before the Bambu Studio plug-in opens its own local session; keeping two
+    // print-capable MQTT sessions alive is unnecessary and can make the
+    // plug-in publish race or lose its local connection.
+    await this.bambu.disconnectAll();
+
+    const threeMfFilename = path.basename(threeMFPath);
+    const projectName = String(args?.project_name || threeMfFilename.replace(/\.3mf$/i, ""));
+    const presetName = String(args?.preset_name || `${projectName}_plate_${plateIndex + 1}`);
+    const nativeResult = await printWithBambuNative({
+      host,
+      serial: bambuSerial,
+      token: bambuToken,
+      filePath: threeMFPath,
+      projectName,
+      presetName,
+      plateIndex,
+      bedType: printBedType,
+      useAMS,
+      amsMapping: stringifyBridgeJson(nativeMapping),
+      amsMapping2: stringifyBridgeJson(args?.ams_mapping2) || nativeAmsMapping2(nativeMapping),
+      amsMappingInfo: stringifyBridgeJson(args?.ams_mapping_info),
+      nozzleMapping: stringifyBridgeJson(args?.nozzle_mapping),
+      nozzlesInfo: stringifyBridgeJson(args?.nozzles_info),
+      bedLeveling: args?.bed_leveling !== undefined ? Boolean(args.bed_leveling) : undefined,
+      flowCalibration: args?.flow_calibration !== undefined ? Boolean(args.flow_calibration) : undefined,
+      vibrationCalibration: args?.vibration_calibration !== undefined ? Boolean(args.vibration_calibration) : undefined,
+      layerInspect: args?.layer_inspect !== undefined ? Boolean(args.layer_inspect) : undefined,
+      timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : undefined,
+    });
+
+    return {
+      ...nativeResult,
+      message: `Bambu native local print command for ${threeMfFilename} sent successfully.`,
+      autoSliced,
+      projectName,
+      plateIndex,
+      useAMS,
+      amsMapping: nativeMapping,
     };
   }
 
@@ -2111,6 +2280,19 @@ class BambuPrinterMCPServer {
             }
           },
           {
+            name: "bambu_connect_import_file",
+            description: "Open an existing G-code or sliced 3MF file in the signed-in Bambu Connect app through its official URL scheme. This is a cloud-mode handoff and does not start printing by itself.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                file_path: { type: "string", description: "Readable local path to a .gcode, .3mf, or .gcode.3mf file" },
+                name: { type: "string", description: "Optional project name shown by Bambu Connect" },
+                version: { type: "string", description: "Optional integration version sent to Bambu Connect (default: 1.0.0)" }
+              },
+              required: ["file_path"]
+            }
+          },
+          {
             name: "bambu_network_bridge_status",
             description: "Inspect or probe the FULU OrcaSlicer-bambulab BambuNetwork bridge runtime used for cloud and restored BambuNetwork printing.",
             inputSchema: {
@@ -2523,8 +2705,8 @@ class BambuPrinterMCPServer {
                 },
                 connection_mode: {
                   type: "string",
-                  enum: ["lan_mqtt_ftps", "bambu_network"],
-                  description: "Print path to use: lan_mqtt_ftps uses this MCP's direct local MQTT/FTPS path; bambu_network uses the restored FULU BambuNetwork bridge."
+                  enum: ["lan_mqtt_ftps", "bambu_network", "bambu_native", "bambu_connect"],
+                  description: "Print path: bambu_connect hands a printable file to the signed-in Bambu Connect app for cloud-mode review; X2D otherwise defaults to bambu_native (Bambu Studio's installed local networking plug-in and emmc tunnel); lan_mqtt_ftps is the legacy direct MQTT/FTPS path; bambu_network uses the FULU bridge."
                 },
                 connection_type: { type: "string", enum: ["cloud", "lan"], description: "BambuNetwork connection type when connection_mode is bambu_network; cloud uses restored internet printing, lan uses local bridge printing." },
                 bambu_network_method: { type: "string", enum: BAMBU_NETWORK_PRINT_METHODS, description: "FULU print method when connection_mode is bambu_network; defaults to start_print for cloud and start_local_print for lan." },
@@ -2760,6 +2942,17 @@ class BambuPrinterMCPServer {
 
           case "list_printer_files":
             result = await this.bambu.getFiles(host, bambuSerial, bambuToken);
+            break;
+
+          case "bambu_connect_import_file":
+            if (!args?.file_path) {
+              throw new Error("Missing required parameter: file_path");
+            }
+            result = await importFileViaBambuConnect({
+              filePath: String(args.file_path),
+              name: args?.name !== undefined ? String(args.name) : undefined,
+              version: args?.version !== undefined ? String(args.version) : undefined,
+            });
             break;
 
           case "bambu_network_bridge_status": {
@@ -3204,8 +3397,29 @@ class BambuPrinterMCPServer {
             if (!args?.three_mf_path) {
               throw new Error("Missing required parameter: three_mf_path");
             }
-            if (String(args?.connection_mode || "lan_mqtt_ftps") === "bambu_network") {
+            const requestedModel = String(args?.bambu_model || DEFAULT_BAMBU_MODEL).trim().toLowerCase();
+            const defaultConnectionMode =
+              DEFAULT_BAMBU_CONNECTION_MODE ||
+              (requestedModel === "x2d" ? "bambu_native" : "lan_mqtt_ftps");
+            const connectionMode = String(args?.connection_mode || defaultConnectionMode);
+            // X2D firmware accepts the Bambu Studio :6000/eMMC route but
+            // rejects the legacy direct FTPS STOR operation with 553. Keep
+            // an explicit old-mode request from re-entering that known-bad
+            // path; callers still get a fully scriptable local print.
+            const effectiveConnectionMode =
+              connectionMode === "lan_mqtt_ftps" && requestedModel === "x2d"
+                ? "bambu_native"
+                : connectionMode;
+            if (effectiveConnectionMode === "bambu_connect") {
+              result = await this.handoff3mfViaBambuConnect(args as Record<string, any>);
+              break;
+            }
+            if (effectiveConnectionMode === "bambu_network") {
               result = await this.print3mfViaBambuNetwork(args as Record<string, any>, host, bambuSerial, bambuToken);
+              break;
+            }
+            if (effectiveConnectionMode === "bambu_native") {
+              result = await this.print3mfViaBambuNative(args as Record<string, any>, host, bambuSerial, bambuToken);
               break;
             }
             if (!bambuSerial || !bambuToken) {

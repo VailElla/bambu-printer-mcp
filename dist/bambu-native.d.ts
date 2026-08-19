@@ -1,0 +1,23 @@
+export type BambuNativePrintOptions = {
+    host: string;
+    serial: string;
+    token: string;
+    filePath: string;
+    projectName: string;
+    presetName: string;
+    plateIndex: number;
+    bedType: string;
+    useAMS: boolean;
+    amsMapping?: string;
+    amsMapping2?: string;
+    amsMappingInfo?: string;
+    nozzleMapping?: string;
+    nozzlesInfo?: string;
+    bedLeveling?: boolean;
+    flowCalibration?: boolean;
+    vibrationCalibration?: boolean;
+    layerInspect?: boolean;
+    timelapse?: boolean;
+};
+export declare function probeBambuNative(host: string, token: string): Promise<Record<string, unknown>>;
+export declare function printWithBambuNative(options: BambuNativePrintOptions): Promise<Record<string, unknown>>;

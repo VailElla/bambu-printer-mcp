@@ -14,6 +14,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import JSZip from "jszip";
 import { hasAmsMappingInput, normalizeAmsMappingObject } from "../dist/ams-mapping.js";
+import { buildBambuConnectImportUrl } from "../dist/bambu-connect.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF } from "../dist/3mf_parser.js";
 import { BambuImplementation } from "../dist/printers/bambu.js";
 import { STLManipulator } from "../dist/stl/stl-manipulator.js";
@@ -137,11 +138,33 @@ function assertCommonToolPresence(listToolsResult) {
   assert.ok(names.includes("print_3mf_bambu_network"), "print_3mf_bambu_network tool must be registered");
   assert.ok(names.includes("bambu_network_bridge_status"), "bambu_network_bridge_status tool must be registered");
   assert.ok(names.includes("bambu_network_call"), "bambu_network_call tool must be registered");
+  assert.ok(names.includes("bambu_connect_import_file"), "bambu_connect_import_file tool must be registered");
   assert.ok(names.includes("upload_gcode"), "upload_gcode tool must be registered");
   assert.ok(names.includes("start_print"), "start_print compatibility alias must be registered");
   assert.ok(names.includes("start_print_job"), "start_print_job tool must be registered");
   assert.ok(names.includes("slice_stl"), "slice_stl tool must be registered");
 }
+
+test("Bambu Connect handoff builds the official encoded import URL without opening the app", () => {
+  const filePath = path.join(os.tmpdir(), `bambu-connect-url-${Date.now()}.gcode.3mf`);
+  fs.writeFileSync(filePath, "fixture");
+
+  try {
+    const importUrl = buildBambuConnectImportUrl({
+      filePath,
+      name: "X2D 云端测试",
+      version: "1.0.0",
+    });
+    const parsed = new URL(importUrl);
+    assert.equal(parsed.protocol, "bambu-connect:");
+    assert.equal(parsed.hostname, "import-file");
+    assert.equal(parsed.searchParams.get("path"), path.resolve(filePath));
+    assert.equal(parsed.searchParams.get("name"), "X2D 云端测试");
+    assert.equal(parsed.searchParams.get("version"), "1.0.0");
+  } finally {
+    fs.rmSync(filePath, { force: true });
+  }
+});
 
 function assertBambuStudioSlicerSupport(listToolsResult) {
   const sliceTool = listToolsResult.tools.find((t) => t.name === "slice_stl");

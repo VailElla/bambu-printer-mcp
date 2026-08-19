@@ -14,7 +14,8 @@
     "start:http": "MCP_TRANSPORT=streamable-http node dist/index.js",
     "build": "tsc",
     "test": "npm run build && node --test tests/*.test.mjs tests/**/*.test.mjs",
-    "postinstall": "patch-package"
+    "postinstall": "patch-package",
+    "build:native": "scripts/build-bambu-native.zsh"
   },
   "bin": {
     "bambu-printer-mcp": "dist/index.js"
@@ -23,6 +24,8 @@
     "dist",
     "src",
     "patches",
+    "native",
+    "scripts/build-bambu-native.zsh",
     "README.md",
     "LICENSE"
   ],
