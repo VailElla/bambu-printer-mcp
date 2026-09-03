@@ -21,3 +21,4 @@ export type BambuNativePrintOptions = {
 };
 export declare function probeBambuNative(host: string, token: string): Promise<Record<string, unknown>>;
 export declare function printWithBambuNative(options: BambuNativePrintOptions): Promise<Record<string, unknown>>;
+export declare function uploadWithBambuNative(options: BambuNativePrintOptions): Promise<Record<string, unknown>>;

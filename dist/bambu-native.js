@@ -133,3 +133,42 @@ export async function printWithBambuNative(options) {
         updates: result.updates,
     };
 }
+export async function uploadWithBambuNative(options) {
+    const result = await runNativeHelper("--upload", {
+        ...process.env,
+        BAMBU_NATIVE_UPLOAD_CONFIRM: "1",
+        BAMBU_NATIVE_HOST: options.host,
+        BAMBU_NATIVE_SERIAL: options.serial,
+        BAMBU_NATIVE_ACCESS_CODE: options.token,
+        BAMBU_NATIVE_FILE: options.filePath,
+        BAMBU_NATIVE_PROJECT_NAME: options.projectName,
+        BAMBU_NATIVE_PRESET_NAME: options.presetName,
+        BAMBU_NATIVE_PLATE_INDEX: String(options.plateIndex + 1),
+        BAMBU_NATIVE_BED_TYPE: options.bedType,
+        BAMBU_NATIVE_USE_AMS: String(options.useAMS),
+        BAMBU_NATIVE_AMS_MAPPING: options.amsMapping || "",
+        BAMBU_NATIVE_AMS_MAPPING2: options.amsMapping2 || "",
+        BAMBU_NATIVE_AMS_MAPPING_INFO: options.amsMappingInfo || "",
+        BAMBU_NATIVE_NOZZLE_MAPPING: options.nozzleMapping || "",
+        BAMBU_NATIVE_NOZZLES_INFO: options.nozzlesInfo || "",
+        BAMBU_NATIVE_BED_LEVELING: boolEnv(options.bedLeveling, true),
+        BAMBU_NATIVE_FLOW_CALIBRATION: boolEnv(options.flowCalibration, true),
+        BAMBU_NATIVE_VIBRATION_CALIBRATION: boolEnv(options.vibrationCalibration, true),
+        BAMBU_NATIVE_LAYER_INSPECT: boolEnv(options.layerInspect, false),
+        BAMBU_NATIVE_TIMELAPSE: boolEnv(options.timelapse, false),
+    }, 300000);
+    if (result.resultCode !== 0) {
+        const detail = [
+            ...result.updates,
+            ...(result.stderr ? [result.stderr.trim()] : []),
+        ]
+            .filter((line) => line.startsWith("native_error=") || line.startsWith("native_upload result=") || line.startsWith("local MQTT connection"))
+            .join("; ");
+        throw new Error(`Bambu native local upload failed (${result.resultCode})${detail ? `: ${detail}` : "."}`);
+    }
+    return {
+        status: "success",
+        route: "bambu:///local",
+        updates: result.updates,
+    };
+}

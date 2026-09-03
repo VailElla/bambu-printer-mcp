@@ -102,6 +102,7 @@ using SendMessageToPrinterFn = int (*)(void *, std::string, std::string, int, in
 using InstallDeviceCertFn = void (*)(void *, std::string, bool);
 using UpdateCertFn = int (*)(void *);
 using StartLocalPrintFn = int (*)(void *, BBL::PrintParams, BBL::OnUpdateStatusFn, BBL::WasCancelledFn);
+using StartSendGcodeToSdcardFn = int (*)(void *, BBL::PrintParams, BBL::OnUpdateStatusFn, BBL::WasCancelledFn, std::function<bool(int, std::string)>);
 
 std::mutex output_mutex;
 
@@ -170,6 +171,7 @@ struct NativeApi {
     FtTunnelCreateFn ftTunnelCreate = nullptr;
     FtTunnelSyncConnectFn ftTunnelSyncConnect = nullptr;
     FtTunnelReleaseFn ftTunnelRelease = nullptr;
+    StartSendGcodeToSdcardFn startSendGcodeToSdcard = nullptr;
 
     ~NativeApi() {
         if (handle) dlclose(handle);
@@ -204,6 +206,7 @@ NativeApi loadApi() {
     api.installDeviceCert = requiredSymbol<InstallDeviceCertFn>(handle, "bambu_network_install_device_cert");
     api.updateCert = requiredSymbol<UpdateCertFn>(handle, "bambu_network_update_cert");
     api.startLocalPrint = requiredSymbol<StartLocalPrintFn>(handle, "bambu_network_start_local_print");
+    api.startSendGcodeToSdcard = requiredSymbol<StartSendGcodeToSdcardFn>(handle, "bambu_network_start_send_gcode_to_sdcard");
     api.ftAbiVersion = requiredSymbol<FtAbiVersionFn>(handle, "ft_abi_version");
     api.ftTunnelCreate = requiredSymbol<FtTunnelCreateFn>(handle, "ft_tunnel_create");
     api.ftTunnelSyncConnect = requiredSymbol<FtTunnelSyncConnectFn>(handle, "ft_tunnel_sync_connect");
@@ -435,9 +438,11 @@ void requestPrinterState(NativeApi &api, void *agent, const std::string &serial)
     outputLine("native_request command=get_access_code result=" + std::to_string(accessCode));
 }
 
-void runPrint(NativeApi &api) {
-    if (envOr("BAMBU_NATIVE_CONFIRM") != "1") {
-        throw std::runtime_error("refusing native print without BAMBU_NATIVE_CONFIRM=1");
+void runPrint(NativeApi &api, bool uploadOnly) {
+    const char *confirmation = uploadOnly ? "BAMBU_NATIVE_UPLOAD_CONFIRM" : "BAMBU_NATIVE_CONFIRM";
+    if (envOr(confirmation) != "1") {
+        throw std::runtime_error(std::string("refusing native ") + (uploadOnly ? "upload" : "print") +
+                                 " without " + confirmation + "=1");
     }
 
     const std::string host = envOr("BAMBU_NATIVE_HOST");
@@ -445,11 +450,13 @@ void runPrint(NativeApi &api) {
     const std::string serial = envOr("BAMBU_NATIVE_SERIAL");
     const std::string file = envOr("BAMBU_NATIVE_FILE");
     if (host.empty() || token.empty() || serial.empty() || file.empty()) {
-        throw std::runtime_error("native print requires host, access code, serial, and file");
+        throw std::runtime_error(std::string("native ") + (uploadOnly ? "upload" : "print") +
+                                 " requires host, access code, serial, and file");
     }
     struct stat fileStat {};
     if (stat(file.c_str(), &fileStat) != 0 || !S_ISREG(fileStat.st_mode)) {
-        throw std::runtime_error("native print file is not readable: " + file);
+        throw std::runtime_error(std::string("native ") + (uploadOnly ? "upload" : "print") +
+                                 " file is not readable: " + file);
     }
 
     const std::string configDir = envOr("BAMBU_NATIVE_CONFIG_DIR",
@@ -559,7 +566,8 @@ void runPrint(NativeApi &api) {
         if (!resolved) {
             lock.unlock();
             destroyAgent();
-            throw std::runtime_error("local MQTT connection timed out before native print");
+            throw std::runtime_error(std::string("local MQTT connection timed out before native ") +
+                                     (uploadOnly ? "upload" : "print"));
         }
         if (!localConnection->ok) {
             const int status = localConnection->status;
@@ -567,7 +575,8 @@ void runPrint(NativeApi &api) {
             lock.unlock();
             destroyAgent();
             throw std::runtime_error(
-                "local MQTT connection failed status=" + std::to_string(status) +
+                std::string("local MQTT connection failed before native ") +
+                (uploadOnly ? "upload" : "print") + " status=" + std::to_string(status) +
                 (message.empty() ? std::string{} : " message=" + message));
         }
     }
@@ -622,21 +631,26 @@ void runPrint(NativeApi &api) {
                    std::to_string(code) + " msg=" + message);
     };
     const BBL::WasCancelledFn cancel = []() { return false; };
-    result = api.startLocalPrint(agent, params, update, cancel);
-    if (result == -4030) {
-        // The first encrypted publish can be the plug-in's certificate
-        // bootstrap. Keep the agent alive long enough for the printer's
-        // response to populate device_pub_key_map, then retry exactly once.
-        const int retryWaitSeconds = intEnv("BAMBU_NATIVE_CERT_RETRY_SECONDS", 8);
-        outputLine("native_retry reason=cert_bootstrap wait_seconds=" + std::to_string(retryWaitSeconds));
-        std::this_thread::sleep_for(std::chrono::seconds(std::max(1, retryWaitSeconds)));
-        api.installDeviceCert(agent, serial, boolEnv("BAMBU_NATIVE_LAN_ONLY", true));
-        const int retryUpdate = api.updateCert(agent);
-        outputLine("native_update_cert result=" + std::to_string(retryUpdate) + " stage=retry");
-        std::this_thread::sleep_for(std::chrono::seconds(3));
+    if (uploadOnly) {
+        const std::function<bool(int, std::string)> wait = [](int, std::string) { return false; };
+        result = api.startSendGcodeToSdcard(agent, params, update, cancel, wait);
+    } else {
         result = api.startLocalPrint(agent, params, update, cancel);
+        if (result == -4030) {
+            // The first encrypted publish can be the plug-in's certificate
+            // bootstrap. Keep the agent alive long enough for the printer's
+            // response to populate device_pub_key_map, then retry exactly once.
+            const int retryWaitSeconds = intEnv("BAMBU_NATIVE_CERT_RETRY_SECONDS", 8);
+            outputLine("native_retry reason=cert_bootstrap wait_seconds=" + std::to_string(retryWaitSeconds));
+            std::this_thread::sleep_for(std::chrono::seconds(std::max(1, retryWaitSeconds)));
+            api.installDeviceCert(agent, serial, boolEnv("BAMBU_NATIVE_LAN_ONLY", true));
+            const int retryUpdate = api.updateCert(agent);
+            outputLine("native_update_cert result=" + std::to_string(retryUpdate) + " stage=retry");
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            result = api.startLocalPrint(agent, params, update, cancel);
+        }
     }
-    outputLine("native_print result=" + std::to_string(result));
+    outputLine(std::string(uploadOnly ? "native_upload" : "native_print") + " result=" + std::to_string(result));
     destroyAgent();
     if (result != 0) std::exit(20);
 }
@@ -648,14 +662,16 @@ int main(int argc, char **argv) {
         const bool probe = argc == 2 && std::strcmp(argv[1], "--probe") == 0;
         const bool mqttProbe = argc == 2 && std::strcmp(argv[1], "--probe-mqtt") == 0;
         const bool print = argc == 2 && std::strcmp(argv[1], "--print") == 0;
-        if (!probe && !mqttProbe && !print) {
-            std::cerr << "usage: bambu-native-print --probe|--probe-mqtt|--print" << std::endl;
+        const bool upload = argc == 2 && std::strcmp(argv[1], "--upload") == 0;
+        if (!probe && !mqttProbe && !print && !upload) {
+            std::cerr << "usage: bambu-native-print --probe|--probe-mqtt|--print|--upload" << std::endl;
             return 2;
         }
         NativeApi api = loadApi();
         if (probe) runProbe(api);
         if (mqttProbe) runMqttProbe(api);
-        if (print) runPrint(api);
+        if (print) runPrint(api, false);
+        if (upload) runPrint(api, true);
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "native_error=" << error.what() << std::endl;

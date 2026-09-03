@@ -10,8 +10,9 @@ import { createServer as createHttpServer } from "node:http";
 import { randomUUID } from "node:crypto";
 import { STLManipulator, SLICER_TYPES, normalizeSlicerType, } from "./stl/stl-manipulator.js";
 import { BambuNetworkBridge } from "./bambu-network-bridge.js";
-import { printWithBambuNative } from "./bambu-native.js";
+import { printWithBambuNative, uploadWithBambuNative } from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
+import { setFanSpeedViaOfficialBambuStudio, setTemperatureViaOfficialBambuStudio, } from "./bambu-studio-control.js";
 import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
 import { BambuImplementation } from "./printers/bambu.js";
@@ -1179,6 +1180,64 @@ class BambuPrinterMCPServer {
             amsMapping: nativeMapping,
         };
     }
+    async uploadFileViaBambuNative(args, host, bambuSerial, bambuToken) {
+        if (!args?.file_path || !args?.filename) {
+            throw new Error("Missing required parameters: file_path and filename");
+        }
+        if (Boolean(args?.print ?? false)) {
+            throw new Error("connection_mode=bambu_native uploads the file only; use print_3mf to start a native print.");
+        }
+        if (!host || host === "localhost") {
+            throw new Error("host or BAMBU_PRINTER_HOST is required for the native Bambu Studio upload route.");
+        }
+        if (!bambuSerial || !bambuToken) {
+            throw new Error("Bambu serial number and access token are required for the native Bambu Studio upload route.");
+        }
+        const uploadModel = await this.resolveBambuModel(args?.bambu_model);
+        if (uploadModel !== "x2d") {
+            throw new Error("connection_mode=bambu_native is currently restricted to the X2D printer.");
+        }
+        const bedType = resolveBedType(args?.bed_type);
+        const plateIndex = args?.plate_index !== undefined ? Number(args.plate_index) : 0;
+        if (!Number.isInteger(plateIndex) || plateIndex < 0) {
+            throw new Error("plate_index must be a non-negative integer.");
+        }
+        const filePath = String(args.file_path);
+        const remoteName = String(args.filename).replace(/^\/+/, "");
+        const projectName = String(args?.project_name || path.basename(remoteName));
+        const presetName = String(args?.preset_name || `${projectName}_plate_${plateIndex + 1}`);
+        const useAMS = args?.use_ams !== undefined ? Boolean(args.use_ams) : false;
+        const nativeResult = await uploadWithBambuNative({
+            host,
+            serial: bambuSerial,
+            token: bambuToken,
+            filePath,
+            projectName,
+            presetName,
+            plateIndex,
+            bedType,
+            useAMS,
+            amsMapping: stringifyBridgeJson(args?.ams_mapping),
+            amsMapping2: stringifyBridgeJson(args?.ams_mapping2),
+            amsMappingInfo: stringifyBridgeJson(args?.ams_mapping_info),
+            nozzleMapping: stringifyBridgeJson(args?.nozzle_mapping),
+            nozzlesInfo: stringifyBridgeJson(args?.nozzles_info),
+            bedLeveling: args?.bed_leveling !== undefined ? Boolean(args.bed_leveling) : undefined,
+            flowCalibration: args?.flow_calibration !== undefined ? Boolean(args.flow_calibration) : undefined,
+            vibrationCalibration: args?.vibration_calibration !== undefined ? Boolean(args.vibration_calibration) : undefined,
+            layerInspect: args?.layer_inspect !== undefined ? Boolean(args.layer_inspect) : undefined,
+            timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : undefined,
+        });
+        return {
+            ...nativeResult,
+            uploaded: true,
+            printRequested: false,
+            remotePath: remoteName.includes("/") ? remoteName : `cache/${remoteName}`,
+            projectName,
+            plateIndex,
+            useAMS,
+        };
+    }
     async getResolvedPrinterFilamentInventory(host, bambuSerial, bambuToken, bambuModel, nozzleDiameter) {
         const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
         let inventory = normalizePrinterFilamentInventory(status, bambuModel, nozzleDiameter);
@@ -1905,11 +1964,31 @@ class BambuPrinterMCPServer {
                                 file_path: { type: "string", description: "Local path to the file to upload" },
                                 filename: { type: "string", description: "Name for the file on the printer" },
                                 print: { type: "boolean", description: "Start printing after upload (default: false)" },
+                                connection_mode: {
+                                    type: "string",
+                                    enum: ["lan_mqtt_ftps", "bambu_native"],
+                                    description: "Upload transport; bambu_native uses the installed Bambu networking plug-in for X2D and never starts printing."
+                                },
                                 bambu_model: {
                                     type: "string",
                                     enum: [...VALID_BAMBU_MODELS],
                                     description: "Required when print is true. Bambu Lab printer model used as a safety confirmation before starting the uploaded file."
                                 },
+                                project_name: { type: "string", description: "Optional project name passed to the native X2D uploader; defaults to filename." },
+                                preset_name: { type: "string", description: "Optional printer preset name passed to the native X2D uploader." },
+                                bed_type: { type: "string", enum: ["textured_plate", "cool_plate", "engineering_plate", "hot_plate", "supertack_plate"], description: "Bed plate type for the native X2D uploader (default: textured_plate)." },
+                                plate_index: { type: "number", description: "Zero-based plate index passed to the native X2D uploader (default: 0)." },
+                                use_ams: { type: "boolean", description: "Whether the native X2D upload should include AMS mapping metadata (default: false)." },
+                                ams_mapping: { type: "array", description: "Optional project-level AMS mapping array for the native X2D upload.", items: { type: "number" } },
+                                ams_mapping2: { type: "string", description: "Optional raw JSON string for the native X2D ams_mapping2 field." },
+                                ams_mapping_info: { type: "string", description: "Optional raw JSON string for native X2D AMS mapping details." },
+                                nozzle_mapping: { type: "string", description: "Optional raw JSON string for native X2D nozzle mapping." },
+                                nozzles_info: { type: "string", description: "Optional raw JSON string for native X2D nozzle metadata." },
+                                bed_leveling: { type: "boolean", description: "Optional bed-leveling flag passed to the native X2D uploader." },
+                                flow_calibration: { type: "boolean", description: "Optional flow-calibration flag passed to the native X2D uploader." },
+                                vibration_calibration: { type: "boolean", description: "Optional vibration-calibration flag passed to the native X2D uploader." },
+                                layer_inspect: { type: "boolean", description: "Optional first-layer inspection flag passed to the native X2D uploader." },
+                                timelapse: { type: "boolean", description: "Optional timelapse flag passed to the native X2D uploader." },
                                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                                 bambu_token: { type: "string", description: "Access token (default: value from env)" }
@@ -2056,12 +2135,13 @@ class BambuPrinterMCPServer {
                     },
                     {
                         name: "set_temperature",
-                        description: "Set the temperature of a printer component (bed, nozzle)",
+                        description: "Set the temperature of a printer component. X2D bed commands on macOS use the officially signed Bambu Studio control bridge.",
                         inputSchema: {
                             type: "object",
                             properties: {
                                 component: { type: "string", description: "Component to heat: bed, nozzle, or extruder" },
                                 temperature: { type: "number", description: "Target temperature in °C" },
+                                confirm_during_print: { type: "boolean", description: "Required for X2D temperature changes while a print is running." },
                                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                                 bambu_token: { type: "string", description: "Access token (default: value from env)" }
@@ -2071,15 +2151,16 @@ class BambuPrinterMCPServer {
                     },
                     {
                         name: "set_fan_speed",
-                        description: "Set a Bambu printer fan speed percentage using the printer's MQTT fan command",
+                        description: "Set a Bambu printer fan speed percentage. X2D on macOS uses the officially signed Bambu Studio control bridge; other models use MQTT.",
                         inputSchema: {
                             type: "object",
                             properties: {
                                 fan: {
                                     type: "string",
-                                    description: "Fan to control: part, auxiliary, chamber, 1, 2, or 3"
+                                    description: "Fan to control: part, auxiliary, right_auxiliary, chamber, 1, 2, 3, or 10"
                                 },
                                 speed: { type: "number", description: "Fan speed percentage from 0 to 100" },
+                                confirm_during_print: { type: "boolean", description: "Required for X2D fan changes while a print is running." },
                                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
                                 bambu_token: { type: "string", description: "Access token (default: value from env)" }
@@ -2445,10 +2526,15 @@ class BambuPrinterMCPServer {
                         if (!args?.file_path || !args?.filename) {
                             throw new Error("Missing required parameters: file_path and filename");
                         }
-                        if (Boolean(args.print ?? false)) {
-                            await this.resolveBambuModel(args?.bambu_model);
+                        if (String(args?.connection_mode || "").trim().toLowerCase() === "bambu_native") {
+                            result = await this.uploadFileViaBambuNative(args, host, bambuSerial, bambuToken);
                         }
-                        result = await this.bambu.uploadFile(host, bambuSerial, bambuToken, String(args.file_path), String(args.filename), Boolean(args.print ?? false));
+                        else {
+                            if (Boolean(args.print ?? false)) {
+                                await this.resolveBambuModel(args?.bambu_model);
+                            }
+                            result = await this.bambu.uploadFile(host, bambuSerial, bambuToken, String(args.file_path), String(args.filename), Boolean(args.print ?? false));
+                        }
                         break;
                     case "start_print":
                     case "start_print_job":
@@ -2492,13 +2578,33 @@ class BambuPrinterMCPServer {
                         if (!args?.component || args?.temperature === undefined) {
                             throw new Error("Missing required parameters: component and temperature");
                         }
-                        result = await this.bambu.setTemperature(host, bambuSerial, bambuToken, String(args.component), Number(args.temperature));
+                        if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+                            const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
+                            const printerState = String(status?.raw?.gcode_state ?? status?.raw?.print?.gcode_state ?? status?.gcode_state ?? status?.status ?? "").toUpperCase();
+                            if (printerState === "RUNNING" && args?.confirm_during_print !== true) {
+                                throw new Error("The X2D is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
+                            }
+                            result = await setTemperatureViaOfficialBambuStudio(String(args.component), Number(args.temperature));
+                        }
+                        else {
+                            result = await this.bambu.setTemperature(host, bambuSerial, bambuToken, String(args.component), Number(args.temperature));
+                        }
                         break;
                     case "set_fan_speed":
                         if (!args?.fan || args?.speed === undefined) {
                             throw new Error("Missing required parameters: fan and speed");
                         }
-                        result = await this.bambu.setFanSpeed(host, bambuSerial, bambuToken, String(args.fan), Number(args.speed));
+                        if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+                            const status = await this.bambu.getStatus(host, bambuSerial, bambuToken);
+                            const printerState = String(status?.raw?.gcode_state ?? status?.raw?.print?.gcode_state ?? status?.gcode_state ?? status?.status ?? "").toUpperCase();
+                            if (printerState === "RUNNING" && args?.confirm_during_print !== true) {
+                                throw new Error("The X2D is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
+                            }
+                            result = await setFanSpeedViaOfficialBambuStudio(String(args.fan), Number(args.speed));
+                        }
+                        else {
+                            result = await this.bambu.setFanSpeed(host, bambuSerial, bambuToken, String(args.fan), Number(args.speed));
+                        }
                         break;
                     case "set_light":
                         if (!args?.light || !args?.mode) {
