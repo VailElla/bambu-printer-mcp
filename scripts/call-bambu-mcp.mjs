@@ -70,7 +70,24 @@ const client = new Client({ name: "qingxiao-bambu-bridge", version: "1.0.0" });
 
 try {
   await client.connect(transport);
-  const result = await client.callTool({ name: toolName, arguments: args });
+  const streamsNativeProgress = toolName === "print_3mf" || toolName === "upload_file";
+  const requestOptions = streamsNativeProgress
+    ? {
+        timeout: 330_000,
+        resetTimeoutOnProgress: true,
+        onprogress: ({ message }) => {
+          const match = /^native_update status=(-?\d+) code=(-?\d+) msg=(.*)$/.exec(message || "");
+          if (!match) return;
+          const safeMessage = match[3].replace(/[\t\r\n]+/g, " ");
+          process.stdout.write(`QINGXIAO_MCP_PROGRESS\t${match[1]}\t${match[2]}\t${safeMessage}\n`);
+        },
+      }
+    : undefined;
+  const result = await client.callTool(
+    { name: toolName, arguments: args },
+    undefined,
+    requestOptions
+  );
   const output = result.content?.find((entry) => entry.type === "text")?.text || "";
   if (result.isError) {
     console.error(output || `MCP tool ${toolName} failed`);

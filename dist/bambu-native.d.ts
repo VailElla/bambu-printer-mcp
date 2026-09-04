@@ -27,11 +27,12 @@ export type BambuNativeControlOptions = {
     qos?: number;
     flag?: number;
 };
+export type BambuNativeUpdateCallback = (line: string) => void;
 export declare function validateBambuNativeControlMessage(messageJson: string): {
     messageJson: string;
     command: string;
 };
 export declare function sendCommandWithBambuNative(options: BambuNativeControlOptions): Promise<Record<string, unknown>>;
 export declare function probeBambuNative(host: string, token: string): Promise<Record<string, unknown>>;
-export declare function printWithBambuNative(options: BambuNativePrintOptions): Promise<Record<string, unknown>>;
-export declare function uploadWithBambuNative(options: BambuNativePrintOptions): Promise<Record<string, unknown>>;
+export declare function printWithBambuNative(options: BambuNativePrintOptions, onUpdate?: BambuNativeUpdateCallback): Promise<Record<string, unknown>>;
+export declare function uploadWithBambuNative(options: BambuNativePrintOptions, onUpdate?: BambuNativeUpdateCallback): Promise<Record<string, unknown>>;

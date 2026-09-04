@@ -24,7 +24,12 @@ import {
   type SlicerType,
 } from "./stl/stl-manipulator.js";
 import { BambuNetworkBridge, type BambuNetworkBridgeOptions } from "./bambu-network-bridge.js";
-import { printWithBambuNative, sendCommandWithBambuNative, uploadWithBambuNative } from "./bambu-native.js";
+import {
+  printWithBambuNative,
+  sendCommandWithBambuNative,
+  uploadWithBambuNative,
+  type BambuNativeUpdateCallback,
+} from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
 import {
   setFanSpeedViaOfficialBambuStudio,
@@ -1531,7 +1536,8 @@ class BambuPrinterMCPServer {
     args: Record<string, any>,
     host: string,
     bambuSerial: string,
-    bambuToken: string
+    bambuToken: string,
+    onUpdate?: BambuNativeUpdateCallback
   ): Promise<Record<string, unknown>> {
     if (!args?.three_mf_path) {
       throw new Error("Missing required parameter: three_mf_path");
@@ -1626,7 +1632,7 @@ class BambuPrinterMCPServer {
       vibrationCalibration: args?.vibration_calibration !== undefined ? Boolean(args.vibration_calibration) : undefined,
       layerInspect: args?.layer_inspect !== undefined ? Boolean(args.layer_inspect) : undefined,
       timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : undefined,
-    });
+    }, onUpdate);
 
     return {
       ...nativeResult,
@@ -1643,7 +1649,8 @@ class BambuPrinterMCPServer {
     args: Record<string, any>,
     host: string,
     bambuSerial: string,
-    bambuToken: string
+    bambuToken: string,
+    onUpdate?: BambuNativeUpdateCallback
   ): Promise<Record<string, unknown>> {
     if (!args?.file_path || !args?.filename) {
       throw new Error("Missing required parameters: file_path and filename");
@@ -1693,7 +1700,7 @@ class BambuPrinterMCPServer {
       vibrationCalibration: args?.vibration_calibration !== undefined ? Boolean(args.vibration_calibration) : undefined,
       layerInspect: args?.layer_inspect !== undefined ? Boolean(args.layer_inspect) : undefined,
       timelapse: args?.timelapse !== undefined ? Boolean(args.timelapse) : undefined,
-    });
+    }, onUpdate);
 
     return {
       ...nativeResult,
@@ -2956,8 +2963,32 @@ class BambuPrinterMCPServer {
       };
     });
 
-    this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    this.server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const { name, arguments: args } = request.params;
+
+      const progressToken = extra._meta?.progressToken;
+      let progressNotifications = Promise.resolve();
+      const reportNativeUpdate: BambuNativeUpdateCallback | undefined = progressToken === undefined
+        ? undefined
+        : (line) => {
+            const match = /^native_update status=(-?\d+) code=(-?\d+) msg=(.*)$/.exec(line);
+            if (!match) return;
+
+            const stage = Number(match[1]);
+            const code = Number(match[2]);
+            const message = match[3];
+            progressNotifications = progressNotifications
+              .then(() => extra.sendNotification({
+                method: "notifications/progress",
+                params: {
+                  progressToken,
+                  progress: code,
+                  total: 100,
+                  message: `native_update status=${stage} code=${code} msg=${message}`,
+                },
+              }))
+              .catch(() => {});
+          };
 
       const host = String(args?.host || DEFAULT_HOST);
       const bambuSerial = String(args?.bambu_serial || DEFAULT_BAMBU_SERIAL);
@@ -3154,7 +3185,9 @@ class BambuPrinterMCPServer {
               throw new Error("Missing required parameters: file_path and filename");
             }
             if (String(args?.connection_mode || "").trim().toLowerCase() === "bambu_native") {
-              result = await this.uploadFileViaBambuNative(args as Record<string, any>, host, bambuSerial, bambuToken);
+              result = await this.uploadFileViaBambuNative(
+                args as Record<string, any>, host, bambuSerial, bambuToken, reportNativeUpdate
+              );
             } else {
               if (Boolean(args.print ?? false)) {
                 await this.resolveBambuModel(args?.bambu_model as string | undefined);
@@ -3649,7 +3682,9 @@ class BambuPrinterMCPServer {
               break;
             }
             if (effectiveConnectionMode === "bambu_native") {
-              result = await this.print3mfViaBambuNative(args as Record<string, any>, host, bambuSerial, bambuToken);
+              result = await this.print3mfViaBambuNative(
+                args as Record<string, any>, host, bambuSerial, bambuToken, reportNativeUpdate
+              );
               break;
             }
             if (!bambuSerial || !bambuToken) {
@@ -3967,6 +4002,7 @@ class BambuPrinterMCPServer {
             throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${name}`);
         }
 
+        await progressNotifications;
         const text = typeof result === "string" ? result : JSON.stringify(result, null, 2);
 
         if (this.runtimeConfig.enableJsonResponse && typeof result === "object") {

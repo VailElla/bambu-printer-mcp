@@ -15,7 +15,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import JSZip from "jszip";
 import { hasAmsMappingInput, normalizeAmsMappingObject } from "../dist/ams-mapping.js";
 import { buildBambuConnectImportUrl } from "../dist/bambu-connect.js";
-import { validateBambuNativeControlMessage } from "../dist/bambu-native.js";
+import { uploadWithBambuNative, validateBambuNativeControlMessage } from "../dist/bambu-native.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF } from "../dist/3mf_parser.js";
 import { BambuImplementation } from "../dist/printers/bambu.js";
 import { STLManipulator } from "../dist/stl/stl-manipulator.js";
@@ -251,6 +251,91 @@ test("X2D public task and AMS tools dispatch through the native helper, includin
   assert.equal(rfidMessage.command, "ams_get_rfid");
   assert.equal(rfidMessage.ams_id, 128);
   assert.equal(rfidMessage.slot_id, 0);
+});
+
+test("native upload forwards helper progress before returning the final result", async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "bambu-native-progress-"));
+  const helperPath = path.join(tempDir, "fake-native-helper.mjs");
+  fs.writeFileSync(
+    helperPath,
+    [
+      "#!/usr/bin/env node",
+      "console.log('native_update status=1 code=12 msg=12%');",
+      "console.log('native_update status=1 code=68 msg=68%');",
+      "console.log('native_upload result=0');",
+      "",
+    ].join("\n")
+  );
+  fs.chmodSync(helperPath, 0o755);
+
+  const previousHelper = process.env.BAMBU_NATIVE_HELPER;
+  process.env.BAMBU_NATIVE_HELPER = helperPath;
+  t.after(() => {
+    if (previousHelper === undefined) delete process.env.BAMBU_NATIVE_HELPER;
+    else process.env.BAMBU_NATIVE_HELPER = previousHelper;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  const progress = [];
+  const result = await uploadWithBambuNative(
+    {
+      host: "127.0.0.1",
+      serial: "TEST_SERIAL",
+      token: "TEST_TOKEN",
+      filePath: "/tmp/test.3mf",
+      projectName: "test.3mf",
+      presetName: "test_plate_1",
+      plateIndex: 0,
+      bedType: "textured_plate",
+      useAMS: false,
+    },
+    (line) => progress.push(line)
+  );
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(progress, [
+    "native_update status=1 code=12 msg=12%",
+    "native_update status=1 code=68 msg=68%",
+    "native_upload result=0",
+  ]);
+
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [SERVER_ENTRY],
+    env: {
+      ...process.env,
+      MCP_TRANSPORT: "stdio",
+      PRINTER_HOST: "127.0.0.1",
+      BAMBU_SERIAL: "TEST_SERIAL",
+      BAMBU_TOKEN: "TEST_TOKEN",
+      BAMBU_MODEL: "x2d",
+      BAMBU_NATIVE_HELPER: helperPath,
+    },
+    stderr: "pipe",
+  });
+  const client = createClient();
+  t.after(async () => closeTransport(transport));
+  await client.connect(transport);
+
+  const notifications = [];
+  const uploadResult = parseJsonResult(await client.callTool(
+    {
+      name: "upload_file",
+      arguments: {
+        file_path: "/tmp/test.3mf",
+        filename: "test.3mf",
+        bambu_model: "x2d",
+        connection_mode: "bambu_native",
+      },
+    },
+    undefined,
+    { onprogress: (update) => notifications.push(update.message) }
+  ));
+  assert.equal(uploadResult.status, "success");
+  assert.deepEqual(notifications, [
+    "native_update status=1 code=12 msg=12%",
+    "native_update status=1 code=68 msg=68%",
+  ]);
 });
 
 function assertBambuStudioSlicerSupport(listToolsResult) {

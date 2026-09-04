@@ -40,6 +40,8 @@ type NativeHelperResult = {
   stderr: string;
 };
 
+export type BambuNativeUpdateCallback = (line: string) => void;
+
 function firstExistingExecutable(candidates: string[]): string | undefined {
   return candidates.find((candidate) => {
     try {
@@ -76,7 +78,12 @@ function tail(value: string, maxLength = 4000): string {
   return value.length > maxLength ? value.slice(-maxLength) : value;
 }
 
-function runNativeHelper(mode: "--probe" | "--print" | "--upload" | "--command", env: NodeJS.ProcessEnv, timeoutMs: number): Promise<NativeHelperResult> {
+function runNativeHelper(
+  mode: "--probe" | "--print" | "--upload" | "--command",
+  env: NodeJS.ProcessEnv,
+  timeoutMs: number,
+  onUpdate?: BambuNativeUpdateCallback
+): Promise<NativeHelperResult> {
   const helper = resolveNativeHelper();
   return new Promise((resolve, reject) => {
     const child = spawn(helper, [mode], {
@@ -100,7 +107,10 @@ function runNativeHelper(mode: "--probe" | "--print" | "--upload" | "--command",
       stdout = lines.pop() || "";
       for (const line of lines) {
         const trimmed = line.trim();
-        if (trimmed) updates.push(trimmed);
+        if (trimmed) {
+          updates.push(trimmed);
+          onUpdate?.(trimmed);
+        }
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
@@ -117,7 +127,10 @@ function runNativeHelper(mode: "--probe" | "--print" | "--upload" | "--command",
       settled = true;
       clearTimeout(timer);
       const trailing = stdout.trim();
-      if (trailing) updates.push(trailing);
+      if (trailing) {
+        updates.push(trailing);
+        onUpdate?.(trailing);
+      }
       resolve({ resultCode: code ?? (signal ? 1 : 0), updates, stderr });
     });
   });
@@ -234,7 +247,10 @@ export async function probeBambuNative(host: string, token: string): Promise<Rec
   return { status: "ok", route: "bambu:///local", updates: result.updates };
 }
 
-export async function printWithBambuNative(options: BambuNativePrintOptions): Promise<Record<string, unknown>> {
+export async function printWithBambuNative(
+  options: BambuNativePrintOptions,
+  onUpdate?: BambuNativeUpdateCallback
+): Promise<Record<string, unknown>> {
   const result = await runNativeHelper(
     "--print",
     {
@@ -260,7 +276,8 @@ export async function printWithBambuNative(options: BambuNativePrintOptions): Pr
       BAMBU_NATIVE_LAYER_INSPECT: boolEnv(options.layerInspect, false),
       BAMBU_NATIVE_TIMELAPSE: boolEnv(options.timelapse, false),
     },
-    300_000
+    300_000,
+    onUpdate
   );
   if (result.resultCode !== 0) {
     const detail = [
@@ -278,7 +295,10 @@ export async function printWithBambuNative(options: BambuNativePrintOptions): Pr
   };
 }
 
-export async function uploadWithBambuNative(options: BambuNativePrintOptions): Promise<Record<string, unknown>> {
+export async function uploadWithBambuNative(
+  options: BambuNativePrintOptions,
+  onUpdate?: BambuNativeUpdateCallback
+): Promise<Record<string, unknown>> {
   const result = await runNativeHelper(
     "--upload",
     {
@@ -304,7 +324,8 @@ export async function uploadWithBambuNative(options: BambuNativePrintOptions): P
       BAMBU_NATIVE_LAYER_INSPECT: boolEnv(options.layerInspect, false),
       BAMBU_NATIVE_TIMELAPSE: boolEnv(options.timelapse, false),
     },
-    300_000
+    300_000,
+    onUpdate
   );
   if (result.resultCode !== 0) {
     const detail = [

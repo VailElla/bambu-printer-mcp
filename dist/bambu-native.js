@@ -33,7 +33,7 @@ function boolEnv(value, fallback) {
 function tail(value, maxLength = 4000) {
     return value.length > maxLength ? value.slice(-maxLength) : value;
 }
-function runNativeHelper(mode, env, timeoutMs) {
+function runNativeHelper(mode, env, timeoutMs, onUpdate) {
     const helper = resolveNativeHelper();
     return new Promise((resolve, reject) => {
         const child = spawn(helper, [mode], {
@@ -57,8 +57,10 @@ function runNativeHelper(mode, env, timeoutMs) {
             stdout = lines.pop() || "";
             for (const line of lines) {
                 const trimmed = line.trim();
-                if (trimmed)
+                if (trimmed) {
                     updates.push(trimmed);
+                    onUpdate?.(trimmed);
+                }
             }
         });
         child.stderr.on("data", (chunk) => {
@@ -77,8 +79,10 @@ function runNativeHelper(mode, env, timeoutMs) {
             settled = true;
             clearTimeout(timer);
             const trailing = stdout.trim();
-            if (trailing)
+            if (trailing) {
                 updates.push(trailing);
+                onUpdate?.(trailing);
+            }
             resolve({ resultCode: code ?? (signal ? 1 : 0), updates, stderr });
         });
     });
@@ -175,7 +179,7 @@ export async function probeBambuNative(host, token) {
     }
     return { status: "ok", route: "bambu:///local", updates: result.updates };
 }
-export async function printWithBambuNative(options) {
+export async function printWithBambuNative(options, onUpdate) {
     const result = await runNativeHelper("--print", {
         ...process.env,
         BAMBU_NATIVE_CONFIRM: "1",
@@ -198,7 +202,7 @@ export async function printWithBambuNative(options) {
         BAMBU_NATIVE_VIBRATION_CALIBRATION: boolEnv(options.vibrationCalibration, true),
         BAMBU_NATIVE_LAYER_INSPECT: boolEnv(options.layerInspect, false),
         BAMBU_NATIVE_TIMELAPSE: boolEnv(options.timelapse, false),
-    }, 300000);
+    }, 300000, onUpdate);
     if (result.resultCode !== 0) {
         const detail = [
             ...result.updates,
@@ -214,7 +218,7 @@ export async function printWithBambuNative(options) {
         updates: result.updates,
     };
 }
-export async function uploadWithBambuNative(options) {
+export async function uploadWithBambuNative(options, onUpdate) {
     const result = await runNativeHelper("--upload", {
         ...process.env,
         BAMBU_NATIVE_UPLOAD_CONFIRM: "1",
@@ -237,7 +241,7 @@ export async function uploadWithBambuNative(options) {
         BAMBU_NATIVE_VIBRATION_CALIBRATION: boolEnv(options.vibrationCalibration, true),
         BAMBU_NATIVE_LAYER_INSPECT: boolEnv(options.layerInspect, false),
         BAMBU_NATIVE_TIMELAPSE: boolEnv(options.timelapse, false),
-    }, 300000);
+    }, 300000, onUpdate);
     if (result.resultCode !== 0) {
         const detail = [
             ...result.updates,
