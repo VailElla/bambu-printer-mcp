@@ -15,7 +15,12 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import JSZip from "jszip";
 import { hasAmsMappingInput, normalizeAmsMappingObject } from "../dist/ams-mapping.js";
 import { buildBambuConnectImportUrl } from "../dist/bambu-connect.js";
-import { buildBambuNativeFanCommand, uploadWithBambuNative, validateBambuNativeControlMessage } from "../dist/bambu-native.js";
+import {
+  buildBambuNativeFanCommand,
+  buildBambuNativeTemperatureCommand,
+  uploadWithBambuNative,
+  validateBambuNativeControlMessage,
+} from "../dist/bambu-native.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF } from "../dist/3mf_parser.js";
 import { BambuImplementation } from "../dist/printers/bambu.js";
 import { STLManipulator } from "../dist/stl/stl-manipulator.js";
@@ -168,7 +173,7 @@ test("Bambu Connect handoff builds the official encoded import URL without openi
   }
 });
 
-test("X2D native control accepts task and AMS commands but rejects unrelated device JSON", () => {
+test("X2D native control accepts Studio device commands but rejects unrelated device JSON", () => {
   const pause = validateBambuNativeControlMessage(
     JSON.stringify({ print: { command: "pause", sequence_id: "1", param: "" } })
   );
@@ -191,17 +196,43 @@ test("X2D native control accepts task and AMS commands but rejects unrelated dev
     print: { command: "set_fan", sequence_id: "fan-test", fan_index: 10, speed: 0 },
   });
 
+  const temperatureCommand = buildBambuNativeTemperatureCommand("bed", 55.4, "temp-test");
+  assert.deepEqual(JSON.parse(temperatureCommand.messageJson), {
+    print: { command: "set_bed_temp", sequence_id: "temp-test", temp: 55 },
+  });
+
+  for (const message of [
+    { print: { command: "ams_filament_setting", sequence_id: "4", ams_id: 0, slot_id: 1, tray_id: 1, tray_info_idx: "GFA00", setting_id: "GFSA00", tray_color: "FFFFFFFF", nozzle_temp_min: 190, nozzle_temp_max: 240, tray_type: "PLA" } },
+    { print: { command: "extrusion_cali_get", sequence_id: "5", filament_id: "GFA00", nozzle_diameter: "0.4" } },
+    { print: { command: "extrusion_cali_sel", sequence_id: "6", tray_id: 1, ams_id: 0, slot_id: 1, cali_idx: -1, filament_id: "GFA00", nozzle_diameter: "0.4" } },
+    { print: { command: "gcode_file", sequence_id: "6b", param: "/usr/etc/print/auto_cali_for_user.gcode" } },
+    { print: { command: "set_ctt", sequence_id: "6c", temp: 40 } },
+    { system: { command: "ledctrl", sequence_id: "7", led_node: "chamber_light", led_mode: "off" } },
+    { camera: { command: "ipcam_resolution_set", sequence_id: "8", resolution: "1080p" } },
+    { xcam: { command: "xcam_control_set", sequence_id: "9", module_name: "fod_check", control: true } },
+  ]) {
+    assert.doesNotThrow(() => validateBambuNativeControlMessage(JSON.stringify(message)));
+  }
+
   assert.throws(
     () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "set_bed_temp", temp: 120 } })),
-    /not allowed/i
+    /sequence_id/i
   );
   assert.throws(
     () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_line", param: "M104 S300" } })),
     /limited to AMS/i
   );
   assert.throws(
+    () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_file", param: "/tmp/arbitrary.gcode" } })),
+    /built-in user calibration/i
+  );
+  assert.throws(
     () => validateBambuNativeControlMessage(JSON.stringify({ system: { command: "reboot" } })),
-    /print command envelope/i
+    /not allowed/i
+  );
+  assert.throws(
+    () => validateBambuNativeControlMessage(JSON.stringify({ upgrade: { command: "start" } })),
+    /not allowed/i
   );
   assert.throws(
     () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "set_fan", sequence_id: "1", fan_index: 0, speed: 0 } })),
@@ -266,6 +297,45 @@ test("X2D public task and AMS tools dispatch through the native helper, includin
   assert.equal(fanMessage.command, "set_fan");
   assert.equal(fanMessage.fan_index, 1);
   assert.equal(fanMessage.speed, 0);
+
+  const amsSetting = {
+    print: {
+      command: "ams_filament_setting",
+      sequence_id: "ams-setting-test",
+      ams_id: 0,
+      slot_id: 1,
+      tray_id: 1,
+      tray_info_idx: "GFA00",
+      setting_id: "GFSA00",
+      tray_color: "FFFFFFFF",
+      nozzle_temp_min: 190,
+      nozzle_temp_max: 240,
+      tray_type: "PLA",
+    },
+  };
+  const amsSettingResult = parseJsonResult(
+    await client.callTool({ name: "x2d_native_control", arguments: { message_json: JSON.stringify(amsSetting) } })
+  );
+  assert.equal(amsSettingResult.route, "bambu:///local");
+  assert.deepEqual(JSON.parse(amsSettingResult.updates[0]).message, amsSetting);
+
+  const paSelection = {
+    print: {
+      command: "extrusion_cali_sel",
+      sequence_id: "pa-selection-test",
+      tray_id: 1,
+      ams_id: 0,
+      slot_id: 1,
+      cali_idx: -1,
+      filament_id: "GFA00",
+      nozzle_diameter: "0.4",
+    },
+  };
+  const paSelectionResult = parseJsonResult(
+    await client.callTool({ name: "x2d_native_control", arguments: { message_json: JSON.stringify(paSelection) } })
+  );
+  assert.equal(paSelectionResult.route, "bambu:///local");
+  assert.deepEqual(JSON.parse(paSelectionResult.updates[0]).message, paSelection);
 
   const drying = parseJsonResult(
     await client.callTool({ name: "set_ams_drying", arguments: { action: "stop", ams_id: 128 } })

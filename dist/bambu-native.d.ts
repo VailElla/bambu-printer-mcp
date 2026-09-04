@@ -35,7 +35,14 @@ export type BambuNativeFanCommand = {
     speed: number;
     messageJson: string;
 };
+export type BambuNativeTemperatureCommand = {
+    component: "bed" | "nozzle";
+    requestedTemperature: number;
+    temperature: number;
+    messageJson: string;
+};
 export declare function buildBambuNativeFanCommand(fan: string | number, speed: number, sequenceId?: string): BambuNativeFanCommand;
+export declare function buildBambuNativeTemperatureCommand(component: string, temperature: number, sequenceId?: string): BambuNativeTemperatureCommand;
 export declare function validateBambuNativeControlMessage(messageJson: string): {
     messageJson: string;
     command: string;

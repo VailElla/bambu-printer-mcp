@@ -26,15 +26,13 @@ import {
 import { BambuNetworkBridge, type BambuNetworkBridgeOptions } from "./bambu-network-bridge.js";
 import {
   buildBambuNativeFanCommand,
+  buildBambuNativeTemperatureCommand,
   printWithBambuNative,
   sendCommandWithBambuNative,
   uploadWithBambuNative,
   type BambuNativeUpdateCallback,
 } from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
-import {
-  setTemperatureViaOfficialBambuStudio,
-} from "./bambu-studio-control.js";
 import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF, extractBambuTemplateSettings, getCollarCharmRolePolicy, parse3MF } from './3mf_parser.js';
 import type { ThreeMFAmsRequirements } from "./types.js";
@@ -2633,11 +2631,11 @@ class BambuPrinterMCPServer {
           },
           {
             name: "x2d_native_control",
-            description: "Send an allowlisted pause, resume, stop, or AMS control through the installed Bambu networking plug-in.",
+            description: "Send an allowlisted X2D device control through the installed Bambu networking plug-in.",
             inputSchema: {
               type: "object",
               properties: {
-                message_json: { type: "string", description: "Bambu print-command JSON. Only pause/resume/stop and allowlisted AMS controls are accepted." },
+                message_json: { type: "string", description: "Bambu device-command JSON. Only the allowlisted Studio control envelopes are accepted; firmware upgrades and arbitrary G-code are rejected." },
                 qos: { type: "number", description: "MQTT QoS used by Bambu Studio (0 or 1; default 0)." },
                 flag: { type: "number", description: "Bambu networking plug-in command flag (0 or 1; default 0)." },
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
@@ -2712,7 +2710,7 @@ class BambuPrinterMCPServer {
           },
           {
             name: "set_temperature",
-            description: "Set the temperature of a printer component. X2D bed commands on macOS use the officially signed Bambu Studio control bridge.",
+            description: "Set the temperature of a printer component. X2D on macOS uses the installed Bambu networking plug-in without UI automation.",
             inputSchema: {
               type: "object",
               properties: {
@@ -2728,7 +2726,7 @@ class BambuPrinterMCPServer {
           },
           {
             name: "set_fan_speed",
-            description: "Set a Bambu printer fan speed percentage. X2D on macOS uses the officially signed Bambu Studio control bridge; other models use MQTT.",
+            description: "Set a Bambu printer fan speed percentage. X2D on macOS uses the installed Bambu networking plug-in without UI automation; other models use MQTT.",
             inputSchema: {
               type: "object",
               properties: {
@@ -3270,21 +3268,70 @@ class BambuPrinterMCPServer {
           }
 
           case "clear_hms_errors":
-            result = await this.bambu.clearHmsErrors(host, bambuSerial, bambuToken);
+            result = DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin"
+              ? await sendCommandWithBambuNative({
+                  host,
+                  serial: bambuSerial,
+                  token: bambuToken,
+                  messageJson: JSON.stringify({
+                    print: { command: "clean_print_error", sequence_id: String(Date.now()) },
+                  }),
+                })
+              : await this.bambu.clearHmsErrors(host, bambuSerial, bambuToken);
             break;
 
           case "set_print_speed":
             if (!args?.mode) {
               throw new Error("Missing required parameter: mode");
             }
-            result = await this.bambu.setPrintSpeed(host, bambuSerial, bambuToken, String(args.mode));
+            if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+              const normalized = String(args.mode).trim().toLowerCase();
+              const mode = normalized === "silent" ? 1
+                : normalized === "standard" ? 2
+                  : normalized === "sport" ? 3
+                    : normalized === "ludicrous" ? 4
+                      : Number(normalized);
+              if (!Number.isInteger(mode) || mode < 1 || mode > 4) {
+                throw new Error("Print speed mode must be one of: silent, standard, sport, ludicrous, 1, 2, 3, 4.");
+              }
+              result = await sendCommandWithBambuNative({
+                host,
+                serial: bambuSerial,
+                token: bambuToken,
+                messageJson: JSON.stringify({
+                  print: { command: "print_speed", param: String(mode), sequence_id: String(Date.now()) },
+                }),
+              });
+            } else {
+              result = await this.bambu.setPrintSpeed(host, bambuSerial, bambuToken, String(args.mode));
+            }
             break;
 
           case "set_airduct_mode":
             if (!args?.mode) {
               throw new Error("Missing required parameter: mode");
             }
-            result = await this.bambu.setAirductMode(host, bambuSerial, bambuToken, String(args.mode));
+            if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+              const mode = String(args.mode).trim().toLowerCase();
+              if (mode !== "cooling" && mode !== "heating") {
+                throw new Error("Airduct mode must be one of: cooling, heating.");
+              }
+              result = await sendCommandWithBambuNative({
+                host,
+                serial: bambuSerial,
+                token: bambuToken,
+                messageJson: JSON.stringify({
+                  print: {
+                    command: "set_airduct",
+                    modeId: mode === "cooling" ? 0 : 1,
+                    submode: -1,
+                    sequence_id: String(Date.now()),
+                  },
+                }),
+              });
+            } else {
+              result = await this.bambu.setAirductMode(host, bambuSerial, bambuToken, String(args.mode));
+            }
             break;
 
           case "reread_ams_rfid":
@@ -3334,10 +3381,20 @@ class BambuPrinterMCPServer {
               if (printerState === "RUNNING" && args?.confirm_during_print !== true) {
                 throw new Error("The X2D is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
               }
-              result = await setTemperatureViaOfficialBambuStudio(
-                String(args.component),
-                Number(args.temperature)
+              const temperatureCommand = buildBambuNativeTemperatureCommand(
+                String(args.component), Number(args.temperature)
               );
+              result = {
+                ...await sendCommandWithBambuNative({
+                  host,
+                  serial: bambuSerial,
+                  token: bambuToken,
+                  messageJson: temperatureCommand.messageJson,
+                }),
+                component: temperatureCommand.component,
+                requested_temperature: temperatureCommand.requestedTemperature,
+                temperature: temperatureCommand.temperature,
+              };
             } else {
               result = await this.bambu.setTemperature(
                 host, bambuSerial, bambuToken,
@@ -3384,25 +3441,69 @@ class BambuPrinterMCPServer {
             if (!args?.light || !args?.mode) {
               throw new Error("Missing required parameters: light and mode");
             }
-            result = await this.bambu.setLight(
-              host,
-              bambuSerial,
-              bambuToken,
-              String(args.light),
-              String(args.mode)
-            );
+            if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+              const light = String(args.light).trim();
+              const mode = String(args.mode).trim().toLowerCase();
+              if (light !== "chamber_light" && light !== "chamber_light2") {
+                throw new Error("X2D light must be chamber_light or chamber_light2.");
+              }
+              if (!["on", "off", "flashing"].includes(mode)) {
+                throw new Error("Light mode must be one of: on, off, flashing.");
+              }
+              result = await sendCommandWithBambuNative({
+                host,
+                serial: bambuSerial,
+                token: bambuToken,
+                messageJson: JSON.stringify({
+                  system: {
+                    command: "ledctrl",
+                    led_node: light,
+                    led_mode: mode,
+                    led_on_time: 500,
+                    led_off_time: 500,
+                    loop_times: 0,
+                    interval_time: 0,
+                    sequence_id: String(Date.now()),
+                  },
+                }),
+              });
+            } else {
+              result = await this.bambu.setLight(
+                host,
+                bambuSerial,
+                bambuToken,
+                String(args.light),
+                String(args.mode)
+              );
+            }
             break;
 
           case "skip_objects":
             if (!Array.isArray(args?.object_ids)) {
               throw new Error("Missing required parameter: object_ids");
             }
-            result = await this.bambu.skipObjects(
-              host,
-              bambuSerial,
-              bambuToken,
-              args.object_ids.map((id: unknown) => Number(id))
-            );
+            if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+              const objectIds = args.object_ids.map((id: unknown) => Number(id));
+              if (objectIds.length === 0 || objectIds.some((id: number) => !Number.isInteger(id) || id < 0)) {
+                throw new Error("object_ids must contain one or more non-negative integers.");
+              }
+              result = await sendCommandWithBambuNative({
+                host,
+                serial: bambuSerial,
+                token: bambuToken,
+                messageJson: JSON.stringify({
+                  print: { command: "skip_objects", obj_list: objectIds, sequence_id: String(Date.now()) },
+                }),
+                qos: 1,
+              });
+            } else {
+              result = await this.bambu.skipObjects(
+                host,
+                bambuSerial,
+                bambuToken,
+                args.object_ids.map((id: unknown) => Number(id))
+              );
+            }
             break;
 
           case "set_ams_drying":

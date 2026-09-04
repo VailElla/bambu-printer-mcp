@@ -50,6 +50,13 @@ export type BambuNativeFanCommand = {
   messageJson: string;
 };
 
+export type BambuNativeTemperatureCommand = {
+  component: "bed" | "nozzle";
+  requestedTemperature: number;
+  temperature: number;
+  messageJson: string;
+};
+
 function firstExistingExecutable(candidates: string[]): string | undefined {
   return candidates.find((candidate) => {
     try {
@@ -145,18 +152,57 @@ function runNativeHelper(
 }
 
 const X2D_NATIVE_PRINT_COMMANDS = new Set([
-  "pause",
-  "resume",
-  "stop",
   "ams_change_filament",
-  "ams_user_setting",
+  "ams_control",
+  "ams_filament_drying",
   "ams_filament_setting",
   "ams_get_rfid",
-  "ams_control",
   "ams_reset",
-  "ams_filament_drying",
+  "ams_user_setting",
   "auto_stop_ams_dry",
+  "back_to_center",
+  "buzzer_ctrl",
+  "calibration",
+  "clean_print_error",
+  "close_air_filt",
+  "extrusion_cali",
+  "extrusion_cali_del",
+  "extrusion_cali_get",
+  "extrusion_cali_get_result",
+  "extrusion_cali_sel",
+  "extrusion_cali_set",
+  "flowrate_cali",
+  "flowrate_get_result",
+  "get_auto_nozzle_mapping",
+  "holder_nozzle_refresh",
+  "idle_ignore",
+  "ignore",
+  "nozzle_holder_ctrl",
+  "nozzle_info_confirm",
+  "pause",
+  "print_speed",
+  "refresh_nozzle",
+  "resume",
+  "select_extruder",
+  "set_against_continued_heating_mode",
+  "set_airduct",
+  "set_ctt",
+  "set_extrusion_length",
+  "skip_objects",
+  "stop",
+  "xyz_ctrl",
 ]);
+
+const X2D_NATIVE_SYSTEM_COMMANDS = new Set(["ledctrl", "print_cache_set", "set_door_stat", "uiop"]);
+const X2D_NATIVE_CAMERA_COMMANDS = new Set([
+  "ipcam_cap_pic_set",
+  "ipcam_delete_oldest_timelapse",
+  "ipcam_get_media_info",
+  "ipcam_record_set",
+  "ipcam_resolution_set",
+  "ipcam_timelapse",
+]);
+const X2D_NATIVE_XCAM_COMMANDS = new Set(["xcam_control_set"]);
 
 export function buildBambuNativeFanCommand(
   fan: string | number,
@@ -198,6 +244,47 @@ export function buildBambuNativeFanCommand(
   };
 }
 
+export function buildBambuNativeTemperatureCommand(
+  component: string,
+  temperature: number,
+  sequenceId = String(Date.now())
+): BambuNativeTemperatureCommand {
+  const normalized = component.trim().toLowerCase();
+  const normalizedComponent = normalized === "bed"
+    ? "bed" as const
+    : ["extruder", "nozzle", "tool", "tool0"].includes(normalized)
+      ? "nozzle" as const
+      : undefined;
+  if (!normalizedComponent) {
+    throw new Error("Unsupported X2D temperature component. Use bed, nozzle, extruder, tool, or tool0.");
+  }
+  const roundedTemperature = Math.round(temperature);
+  const maximum = normalizedComponent === "bed" ? 120 : 300;
+  if (!Number.isFinite(temperature) || roundedTemperature < 0 || roundedTemperature > maximum) {
+    throw new Error(`X2D ${normalizedComponent} temperature must be between 0 and ${maximum}°C.`);
+  }
+
+  return {
+    component: normalizedComponent,
+    requestedTemperature: temperature,
+    temperature: roundedTemperature,
+    messageJson: JSON.stringify({
+      print: normalizedComponent === "bed"
+        ? {
+            command: "set_bed_temp",
+            sequence_id: sequenceId,
+            temp: roundedTemperature,
+          }
+        : {
+            command: "set_nozzle_temp",
+            sequence_id: sequenceId,
+            extruder_index: 0,
+            target_temp: roundedTemperature,
+          },
+    }),
+  };
+}
+
 export function validateBambuNativeControlMessage(messageJson: string): {
   messageJson: string;
   command: string;
@@ -213,11 +300,54 @@ export function validateBambuNativeControlMessage(messageJson: string): {
   }
 
   const envelope = parsed as Record<string, unknown>;
-  if (Object.keys(envelope).length !== 1 || !envelope.print || typeof envelope.print !== "object" || Array.isArray(envelope.print)) {
-    throw new Error("X2D native control accepts exactly one print command envelope.");
+  if (Object.keys(envelope).length !== 1) {
+    throw new Error("X2D native control accepts exactly one command envelope.");
   }
-  const print = envelope.print as Record<string, unknown>;
+  const section = Object.keys(envelope)[0];
+  const payload = envelope[section];
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    throw new Error("X2D native control command envelope must contain an object.");
+  }
+  const print = payload as Record<string, unknown>;
   const command = typeof print.command === "string" ? print.command : "";
+  if (section === "system" && X2D_NATIVE_SYSTEM_COMMANDS.has(command)) {
+    return { messageJson: JSON.stringify(parsed), command };
+  }
+  if (section === "camera" && X2D_NATIVE_CAMERA_COMMANDS.has(command)) {
+    return { messageJson: JSON.stringify(parsed), command };
+  }
+  if (section === "xcam" && X2D_NATIVE_XCAM_COMMANDS.has(command)) {
+    return { messageJson: JSON.stringify(parsed), command };
+  }
+  if (section !== "print") {
+    throw new Error(`X2D native control command is not allowed: ${section}.${command || "<missing>"}.`);
+  }
+  if (command === "set_bed_temp" || command === "set_nozzle_temp") {
+    const allowedKeys = command === "set_bed_temp"
+      ? new Set(["command", "sequence_id", "temp"])
+      : new Set(["command", "sequence_id", "extruder_index", "target_temp"]);
+    if (Object.keys(print).some((key) => !allowedKeys.has(key))) {
+      throw new Error(`X2D native ${command} contains unsupported fields.`);
+    }
+    if (typeof print.sequence_id !== "string" || print.sequence_id.length === 0) {
+      throw new Error(`X2D native ${command} requires a sequence_id string.`);
+    }
+    const temperature = Number(command === "set_bed_temp" ? print.temp : print.target_temp);
+    const maximum = command === "set_bed_temp" ? 120 : 300;
+    if (!Number.isInteger(temperature) || temperature < 0 || temperature > maximum) {
+      throw new Error(`X2D native ${command} temperature must be an integer from 0 to ${maximum}°C.`);
+    }
+    if (command === "set_nozzle_temp" && (!Number.isInteger(print.extruder_index) || Number(print.extruder_index) < 0 || Number(print.extruder_index) > 1)) {
+      throw new Error("X2D native set_nozzle_temp extruder_index must be 0 or 1.");
+    }
+    return { messageJson: JSON.stringify(parsed), command };
+  }
+  if (command === "gcode_file") {
+    if (print.param !== "/usr/etc/print/auto_cali_for_user.gcode") {
+      throw new Error("X2D native gcode_file is limited to the built-in user calibration file.");
+    }
+    return { messageJson: JSON.stringify(parsed), command };
+  }
   if (X2D_NATIVE_PRINT_COMMANDS.has(command)) {
     return { messageJson: JSON.stringify(parsed), command };
   }
@@ -240,8 +370,14 @@ export function validateBambuNativeControlMessage(messageJson: string): {
   }
 
   if (command === "print_option") {
-    if (!("auto_switch_filament" in print) && !("air_print_detect" in print)) {
-      throw new Error("X2D native print_option is limited to AMS options.");
+    const optionKeys = [
+      "air_print_detect", "air_purification", "auto_recovery", "auto_switch_filament",
+      "filament_tangle_detect", "nozzle_blob_detect", "nozzle_blob_detect_v2",
+      "option", "sound_enable",
+    ];
+    const allowedKeys = new Set(["command", "sequence_id", ...optionKeys]);
+    if (!optionKeys.some((key) => key in print) || Object.keys(print).some((key) => !allowedKeys.has(key))) {
+      throw new Error("X2D native print_option contains no supported option or has unsupported fields.");
     }
     return { messageJson: JSON.stringify(parsed), command };
   }
