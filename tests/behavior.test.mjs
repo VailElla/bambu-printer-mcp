@@ -198,6 +198,61 @@ test("X2D native control accepts task and AMS commands but rejects unrelated dev
   );
 });
 
+test("X2D public task and AMS tools dispatch through the native helper, including AMS-HT id 128", async (t) => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "bambu-native-control-"));
+  const helperPath = path.join(tempDir, "fake-native-helper.mjs");
+  fs.writeFileSync(
+    helperPath,
+    [
+      "#!/usr/bin/env node",
+      "console.log(JSON.stringify({ mode: process.argv[2], message: JSON.parse(process.env.BAMBU_NATIVE_COMMAND_JSON) }));",
+      "",
+    ].join("\n")
+  );
+  fs.chmodSync(helperPath, 0o755);
+
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: [SERVER_ENTRY],
+    env: {
+      ...process.env,
+      MCP_TRANSPORT: "stdio",
+      PRINTER_HOST: "127.0.0.1",
+      BAMBU_SERIAL: "TEST_SERIAL",
+      BAMBU_TOKEN: "TEST_TOKEN",
+      BAMBU_MODEL: "x2d",
+      BAMBU_NATIVE_HELPER: helperPath,
+    },
+    stderr: "pipe",
+  });
+  const client = createClient();
+  t.after(async () => {
+    await closeTransport(transport);
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+  await client.connect(transport);
+
+  const pause = parseJsonResult(await client.callTool({ name: "pause_print", arguments: {} }));
+  assert.equal(pause.route, "bambu:///local");
+  assert.equal(JSON.parse(pause.updates[0]).message.print.command, "pause");
+
+  const drying = parseJsonResult(
+    await client.callTool({ name: "set_ams_drying", arguments: { action: "stop", ams_id: 128 } })
+  );
+  const dryingMessage = JSON.parse(drying.updates[0]).message.print;
+  assert.equal(dryingMessage.command, "ams_control");
+  assert.equal(dryingMessage.ams_id, 128);
+  assert.equal(dryingMessage.param, "stop_drying");
+
+  const rfid = parseJsonResult(
+    await client.callTool({ name: "reread_ams_rfid", arguments: { ams_id: 128, slot_id: 0 } })
+  );
+  const rfidMessage = JSON.parse(rfid.updates[0]).message.print;
+  assert.equal(rfidMessage.command, "ams_get_rfid");
+  assert.equal(rfidMessage.ams_id, 128);
+  assert.equal(rfidMessage.slot_id, 0);
+});
+
 function assertBambuStudioSlicerSupport(listToolsResult) {
   const sliceTool = listToolsResult.tools.find((t) => t.name === "slice_stl");
   assert.ok(sliceTool, "slice_stl tool must exist");

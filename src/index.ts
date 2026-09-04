@@ -2690,11 +2690,11 @@ class BambuPrinterMCPServer {
           },
           {
             name: "reread_ams_rfid",
-            description: "Trigger a Bambu AMS RFID re-read for one AMS slot. This can move AMS filament; use only when the printer is idle and unloaded.",
+            description: "Trigger a Bambu AMS RFID re-read for one AMS slot. X2D on macOS uses the native official plug-in route. This can move AMS filament; use only when the printer is idle and unloaded.",
             inputSchema: {
               type: "object",
               properties: {
-                ams_id: { type: "number", description: "AMS unit index from 0 to 3" },
+                ams_id: { type: "number", description: "AMS unit index from 0 to 3, or 128 for an X2D AMS-HT." },
                 slot_id: { type: "number", description: "Slot index within that AMS, from 0 to 3" },
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
@@ -2780,7 +2780,7 @@ class BambuPrinterMCPServer {
           },
           {
             name: "set_ams_drying",
-            description: "Start or stop the AMS filament drying cycle. Available on AMS units with heating capability (AMS Pro / AMS-HT). Sends an ams_control MQTT command to the printer.",
+            description: "Start or stop the AMS filament drying cycle. X2D on macOS uses the native official plug-in route and supports AMS-HT id 128.",
             inputSchema: {
               type: "object",
               properties: {
@@ -2791,7 +2791,7 @@ class BambuPrinterMCPServer {
                 },
                 ams_id: {
                   type: "number",
-                  description: "AMS unit index from 0 to 3"
+                  description: "AMS unit index from 0 to 3, or 128 for an X2D AMS-HT."
                 },
                 host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
                 bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
@@ -3258,13 +3258,37 @@ class BambuPrinterMCPServer {
             if (args?.ams_id === undefined || args?.slot_id === undefined) {
               throw new Error("Missing required parameters: ams_id and slot_id");
             }
-            result = await this.bambu.rereadAmsRfid(
-              host,
-              bambuSerial,
-              bambuToken,
-              Number(args.ams_id),
-              Number(args.slot_id)
-            );
+            if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+              const amsId = Math.trunc(Number(args.ams_id));
+              const slotId = Math.trunc(Number(args.slot_id));
+              if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && amsId !== 128) {
+                throw new Error("X2D ams_id must be 0 to 3, or 128 for AMS-HT.");
+              }
+              if (!Number.isInteger(slotId) || slotId < 0 || slotId > 3) {
+                throw new Error("slot_id must be an integer from 0 to 3.");
+              }
+              result = await sendCommandWithBambuNative({
+                host,
+                serial: bambuSerial,
+                token: bambuToken,
+                messageJson: JSON.stringify({
+                  print: {
+                    command: "ams_get_rfid",
+                    sequence_id: String(Date.now()),
+                    ams_id: amsId,
+                    slot_id: slotId,
+                  },
+                }),
+              });
+            } else {
+              result = await this.bambu.rereadAmsRfid(
+                host,
+                bambuSerial,
+                bambuToken,
+                Number(args.ams_id),
+                Number(args.slot_id)
+              );
+            }
             break;
 
           case "set_temperature":
@@ -3340,13 +3364,37 @@ class BambuPrinterMCPServer {
             if (!args?.action || args?.ams_id === undefined) {
               throw new Error("Missing required parameters: action and ams_id");
             }
-            result = await this.bambu.setAmsDrying(
-              host,
-              bambuSerial,
-              bambuToken,
-              String(args.action),
-              Number(args.ams_id)
-            );
+            if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+              const action = String(args.action).trim().toLowerCase();
+              const amsId = Math.trunc(Number(args.ams_id));
+              if (action !== "start" && action !== "stop") {
+                throw new Error("AMS drying action must be one of: start, stop.");
+              }
+              if ((!Number.isInteger(amsId) || (amsId < 0 || amsId > 3)) && amsId !== 128) {
+                throw new Error("X2D ams_id must be 0 to 3, or 128 for AMS-HT.");
+              }
+              result = await sendCommandWithBambuNative({
+                host,
+                serial: bambuSerial,
+                token: bambuToken,
+                messageJson: JSON.stringify({
+                  print: {
+                    command: "ams_control",
+                    sequence_id: String(Date.now()),
+                    ams_id: amsId,
+                    param: action === "start" ? "start_drying" : "stop_drying",
+                  },
+                }),
+              });
+            } else {
+              result = await this.bambu.setAmsDrying(
+                host,
+                bambuSerial,
+                bambuToken,
+                String(args.action),
+                Number(args.ams_id)
+              );
+            }
             break;
 
           case "extend_stl_base":

@@ -23,6 +23,8 @@ This checkout is a local, pinned adapter for the X2D printer in the sibling
   through `x2d_native_control`. The tool accepts only the task commands and
   AMS operations used by Bambu Studio; unrelated device JSON and arbitrary
   G-code are rejected before the native helper starts.
+- The public `reread_ams_rfid` and `set_ams_drying` MCP tools also use the
+  native route on X2D. They accept AMS ids 0–3 and the X2D AMS-HT id 128.
 
 ## Codex registration
 
