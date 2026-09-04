@@ -26,7 +26,7 @@ const booleanArguments = new Set([
   "confirm",
   "confirm_during_print",
 ]);
-const numericArguments = new Set(["speed", "temperature", "plate_index"]);
+const numericArguments = new Set(["speed", "temperature", "plate_index", "qos", "flag"]);
 const jsonArguments = new Set(["ams_mapping", "ams_slots"]);
 for (const item of rawArgs) {
   const separator = item.indexOf("=");

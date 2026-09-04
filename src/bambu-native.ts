@@ -25,6 +25,15 @@ export type BambuNativePrintOptions = {
   timelapse?: boolean;
 };
 
+export type BambuNativeControlOptions = {
+  host: string;
+  serial: string;
+  token: string;
+  messageJson: string;
+  qos?: number;
+  flag?: number;
+};
+
 type NativeHelperResult = {
   resultCode: number;
   updates: string[];
@@ -67,7 +76,7 @@ function tail(value: string, maxLength = 4000): string {
   return value.length > maxLength ? value.slice(-maxLength) : value;
 }
 
-function runNativeHelper(mode: "--probe" | "--print" | "--upload", env: NodeJS.ProcessEnv, timeoutMs: number): Promise<NativeHelperResult> {
+function runNativeHelper(mode: "--probe" | "--print" | "--upload" | "--command", env: NodeJS.ProcessEnv, timeoutMs: number): Promise<NativeHelperResult> {
   const helper = resolveNativeHelper();
   return new Promise((resolve, reject) => {
     const child = spawn(helper, [mode], {
@@ -112,6 +121,101 @@ function runNativeHelper(mode: "--probe" | "--print" | "--upload", env: NodeJS.P
       resolve({ resultCode: code ?? (signal ? 1 : 0), updates, stderr });
     });
   });
+}
+
+const X2D_NATIVE_PRINT_COMMANDS = new Set([
+  "pause",
+  "resume",
+  "stop",
+  "ams_change_filament",
+  "ams_user_setting",
+  "ams_filament_setting",
+  "ams_get_rfid",
+  "ams_control",
+  "ams_reset",
+  "ams_filament_drying",
+  "auto_stop_ams_dry",
+]);
+
+export function validateBambuNativeControlMessage(messageJson: string): {
+  messageJson: string;
+  command: string;
+} {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(messageJson);
+  } catch {
+    throw new Error("X2D native control message_json must be valid JSON.");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("X2D native control message_json must be a JSON object.");
+  }
+
+  const envelope = parsed as Record<string, unknown>;
+  if (Object.keys(envelope).length !== 1 || !envelope.print || typeof envelope.print !== "object" || Array.isArray(envelope.print)) {
+    throw new Error("X2D native control accepts exactly one print command envelope.");
+  }
+  const print = envelope.print as Record<string, unknown>;
+  const command = typeof print.command === "string" ? print.command : "";
+  if (X2D_NATIVE_PRINT_COMMANDS.has(command)) {
+    return { messageJson: JSON.stringify(parsed), command };
+  }
+
+  if (command === "print_option") {
+    if (!("auto_switch_filament" in print) && !("air_print_detect" in print)) {
+      throw new Error("X2D native print_option is limited to AMS options.");
+    }
+    return { messageJson: JSON.stringify(parsed), command };
+  }
+
+  if (command === "gcode_line") {
+    const param = typeof print.param === "string" ? print.param.trim() : "";
+    if (!/^M620\s+[CRP]\d+\s*$/i.test(param)) {
+      throw new Error("X2D native gcode_line is limited to AMS M620 C/R/P commands.");
+    }
+    return { messageJson: JSON.stringify(parsed), command };
+  }
+
+  throw new Error(`X2D native control command is not allowed: ${command || "<missing>"}.`);
+}
+
+export async function sendCommandWithBambuNative(options: BambuNativeControlOptions): Promise<Record<string, unknown>> {
+  const validated = validateBambuNativeControlMessage(options.messageJson);
+  const qos = options.qos === undefined ? 0 : Math.trunc(options.qos);
+  const flag = options.flag === undefined ? 0 : Math.trunc(options.flag);
+  if (!Number.isFinite(qos) || !Number.isFinite(flag) || qos < 0 || qos > 1 || flag < 0 || flag > 1) {
+    throw new Error("X2D native control qos and flag must be 0 or 1.");
+  }
+
+  const result = await runNativeHelper(
+    "--command",
+    {
+      ...process.env,
+      BAMBU_NATIVE_COMMAND_CONFIRM: "1",
+      BAMBU_NATIVE_HOST: options.host,
+      BAMBU_NATIVE_SERIAL: options.serial,
+      BAMBU_NATIVE_ACCESS_CODE: options.token,
+      BAMBU_NATIVE_COMMAND_JSON: validated.messageJson,
+      BAMBU_NATIVE_COMMAND_QOS: String(qos),
+      BAMBU_NATIVE_COMMAND_FLAG: String(flag),
+    },
+    30_000
+  );
+  if (result.resultCode !== 0) {
+    const detail = [
+      ...result.updates,
+      ...(result.stderr ? [result.stderr.trim()] : []),
+    ]
+      .filter((line) => line.startsWith("native_error=") || line.startsWith("native_command result=") || line.startsWith("local MQTT connection"))
+      .join("; ");
+    throw new Error(`Bambu native X2D control failed (${result.resultCode})${detail ? `: ${detail}` : "."}`);
+  }
+  return {
+    status: "success",
+    route: "bambu:///local",
+    command: validated.command,
+    updates: result.updates,
+  };
 }
 
 export async function probeBambuNative(host: string, token: string): Promise<Record<string, unknown>> {

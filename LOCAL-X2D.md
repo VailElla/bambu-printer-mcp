@@ -19,6 +19,10 @@ This checkout is a local, pinned adapter for the X2D printer in the sibling
   use the plug-in ABI, so the latter does not accidentally start a print. The
   legacy direct FTPS upload is retained for older machines but is not used for
   X2D because the firmware authenticates FTP while rejecting `STOR` with `553`.
+- X2D pause, resume, stop, and AMS controls use the same local plug-in session
+  through `x2d_native_control`. The tool accepts only the task commands and
+  AMS operations used by Bambu Studio; unrelated device JSON and arbitrary
+  G-code are rejected before the native helper starts.
 
 ## Codex registration
 
@@ -33,10 +37,10 @@ expecting the tools to appear in the tool inventory.
 
 ## Safety boundary
 
-Read-only status, AMS inventory, file listing, and slicing have been smoke
-tested against the local printer. No print-start, pause, cancel, temperature,
-or AMS-drying command was sent during setup. Actual printing remains an
-explicit user-confirmed action.
+Read-only status, AMS inventory, file listing, slicing, and the native generic
+message path have been smoke tested against the local printer. No print-start,
+pause, cancel, temperature, or AMS movement command was sent during control
+bridge verification. Actual printing remains an explicit user-confirmed action.
 
 The MCP is configured for stdio only; its HTTP transport is not enabled.
 

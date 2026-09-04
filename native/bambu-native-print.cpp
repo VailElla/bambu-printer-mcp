@@ -438,10 +438,20 @@ void requestPrinterState(NativeApi &api, void *agent, const std::string &serial)
     outputLine("native_request command=get_access_code result=" + std::to_string(accessCode));
 }
 
-void runPrint(NativeApi &api, bool uploadOnly) {
-    const char *confirmation = uploadOnly ? "BAMBU_NATIVE_UPLOAD_CONFIRM" : "BAMBU_NATIVE_CONFIRM";
+enum class NativeOperation {
+    Print,
+    Upload,
+    Command,
+};
+
+void runOperation(NativeApi &api, NativeOperation operation) {
+    const bool uploadOnly = operation == NativeOperation::Upload;
+    const bool commandOnly = operation == NativeOperation::Command;
+    const char *confirmation = commandOnly ? "BAMBU_NATIVE_COMMAND_CONFIRM" :
+                               uploadOnly ? "BAMBU_NATIVE_UPLOAD_CONFIRM" : "BAMBU_NATIVE_CONFIRM";
     if (envOr(confirmation) != "1") {
-        throw std::runtime_error(std::string("refusing native ") + (uploadOnly ? "upload" : "print") +
+        throw std::runtime_error(std::string("refusing native ") +
+                                 (commandOnly ? "command" : uploadOnly ? "upload" : "print") +
                                  " without " + confirmation + "=1");
     }
 
@@ -449,12 +459,16 @@ void runPrint(NativeApi &api, bool uploadOnly) {
     const std::string token = envOr("BAMBU_NATIVE_ACCESS_CODE");
     const std::string serial = envOr("BAMBU_NATIVE_SERIAL");
     const std::string file = envOr("BAMBU_NATIVE_FILE");
-    if (host.empty() || token.empty() || serial.empty() || file.empty()) {
-        throw std::runtime_error(std::string("native ") + (uploadOnly ? "upload" : "print") +
-                                 " requires host, access code, serial, and file");
+    const std::string commandJson = envOr("BAMBU_NATIVE_COMMAND_JSON");
+    if (host.empty() || token.empty() || serial.empty() ||
+        (commandOnly ? commandJson.empty() : file.empty())) {
+        throw std::runtime_error(std::string("native ") +
+                                 (commandOnly ? "command" : uploadOnly ? "upload" : "print") +
+                                 (commandOnly ? " requires host, access code, serial, and command JSON" :
+                                                " requires host, access code, serial, and file"));
     }
     struct stat fileStat {};
-    if (stat(file.c_str(), &fileStat) != 0 || !S_ISREG(fileStat.st_mode)) {
+    if (!commandOnly && (stat(file.c_str(), &fileStat) != 0 || !S_ISREG(fileStat.st_mode))) {
         throw std::runtime_error(std::string("native ") + (uploadOnly ? "upload" : "print") +
                                  " file is not readable: " + file);
     }
@@ -487,6 +501,18 @@ void runPrint(NativeApi &api, bool uploadOnly) {
     if (result != 0) { destroyAgent(); throw std::runtime_error("set_queue_on_main_fn failed: " + std::to_string(result)); }
 
     auto localConnection = std::make_shared<LocalConnectionState>();
+    const int printerCallbackResult = api.setPrinterConnected(
+        agent,
+        [agent, serial, &api](std::string devId) {
+            if (devId.empty() || devId == serial) {
+                api.installDeviceCert(agent, serial, boolEnv("BAMBU_NATIVE_LAN_ONLY", true));
+                outputLine("native_install_device_cert dev=" + serial + " stage=printer_connected");
+            }
+        });
+    if (printerCallbackResult != 0) {
+        destroyAgent();
+        throw std::runtime_error("set_on_printer_connected_fn failed: " + std::to_string(printerCallbackResult));
+    }
     const int callbackResult = api.setLocalConnect(agent, [localConnection, serial, agent, &api](int status, std::string devId, std::string message) {
         outputLine("native_connect status=" + std::to_string(status) + " dev=" + devId + " msg=" + message);
         if (!devId.empty() && devId != serial) return;
@@ -567,7 +593,7 @@ void runPrint(NativeApi &api, bool uploadOnly) {
             lock.unlock();
             destroyAgent();
             throw std::runtime_error(std::string("local MQTT connection timed out before native ") +
-                                     (uploadOnly ? "upload" : "print"));
+                                     (commandOnly ? "command" : uploadOnly ? "upload" : "print"));
         }
         if (!localConnection->ok) {
             const int status = localConnection->status;
@@ -576,7 +602,8 @@ void runPrint(NativeApi &api, bool uploadOnly) {
             destroyAgent();
             throw std::runtime_error(
                 std::string("local MQTT connection failed before native ") +
-                (uploadOnly ? "upload" : "print") + " status=" + std::to_string(status) +
+                (commandOnly ? "command" : uploadOnly ? "upload" : "print") +
+                " status=" + std::to_string(status) +
                 (message.empty() ? std::string{} : " message=" + message));
         }
     }
@@ -588,6 +615,30 @@ void runPrint(NativeApi &api, bool uploadOnly) {
 
     // Allow the asynchronous certificate exchange and device-public-key map
     // update to complete before start_local_print publishes project_file.
+    if (commandOnly) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        const int qos = std::clamp(intEnv("BAMBU_NATIVE_COMMAND_QOS", 0), 0, 1);
+        const int flag = std::clamp(intEnv("BAMBU_NATIVE_COMMAND_FLAG", 0), 0, 1);
+        result = api.sendMessageToPrinter(agent, serial, commandJson, qos, flag);
+        if (result == -4030 || result == -4) {
+            // A protected control may be the first command that asks the
+            // printer for its public key. A non-zero synchronous return means
+            // it was not queued, so one guarded retry cannot duplicate it.
+            const int retryWaitMs = std::max(250, intEnv("BAMBU_NATIVE_CONTROL_RETRY_MS", 1000));
+            outputLine("native_retry reason=control_cert_bootstrap wait_ms=" + std::to_string(retryWaitMs));
+            std::this_thread::sleep_for(std::chrono::milliseconds(retryWaitMs));
+            api.installDeviceCert(agent, serial, boolEnv("BAMBU_NATIVE_LAN_ONLY", true));
+            const int retryUpdate = api.updateCert(agent);
+            outputLine("native_update_cert result=" + std::to_string(retryUpdate) + " stage=control_retry");
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            result = api.sendMessageToPrinter(agent, serial, commandJson, qos, flag);
+        }
+        outputLine("native_command result=" + std::to_string(result));
+        destroyAgent();
+        if (result != 0) std::exit(20);
+        return;
+    }
+
     std::this_thread::sleep_for(std::chrono::seconds(3));
 
     BBL::PrintParams params;
@@ -663,15 +714,17 @@ int main(int argc, char **argv) {
         const bool mqttProbe = argc == 2 && std::strcmp(argv[1], "--probe-mqtt") == 0;
         const bool print = argc == 2 && std::strcmp(argv[1], "--print") == 0;
         const bool upload = argc == 2 && std::strcmp(argv[1], "--upload") == 0;
-        if (!probe && !mqttProbe && !print && !upload) {
-            std::cerr << "usage: bambu-native-print --probe|--probe-mqtt|--print|--upload" << std::endl;
+        const bool command = argc == 2 && std::strcmp(argv[1], "--command") == 0;
+        if (!probe && !mqttProbe && !print && !upload && !command) {
+            std::cerr << "usage: bambu-native-print --probe|--probe-mqtt|--print|--upload|--command" << std::endl;
             return 2;
         }
         NativeApi api = loadApi();
         if (probe) runProbe(api);
         if (mqttProbe) runMqttProbe(api);
-        if (print) runPrint(api, false);
-        if (upload) runPrint(api, true);
+        if (print) runOperation(api, NativeOperation::Print);
+        if (upload) runOperation(api, NativeOperation::Upload);
+        if (command) runOperation(api, NativeOperation::Command);
         return 0;
     } catch (const std::exception &error) {
         std::cerr << "native_error=" << error.what() << std::endl;

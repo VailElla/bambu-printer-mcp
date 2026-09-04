@@ -15,6 +15,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import JSZip from "jszip";
 import { hasAmsMappingInput, normalizeAmsMappingObject } from "../dist/ams-mapping.js";
 import { buildBambuConnectImportUrl } from "../dist/bambu-connect.js";
+import { validateBambuNativeControlMessage } from "../dist/bambu-native.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF } from "../dist/3mf_parser.js";
 import { BambuImplementation } from "../dist/printers/bambu.js";
 import { STLManipulator } from "../dist/stl/stl-manipulator.js";
@@ -131,6 +132,7 @@ function assertCommonToolPresence(listToolsResult) {
   assert.ok(names.includes("set_print_speed"));
   assert.ok(names.includes("set_airduct_mode"));
   assert.ok(names.includes("reread_ams_rfid"));
+  assert.ok(names.includes("x2d_native_control"));
   assert.ok(names.includes("skip_objects"));
   assert.ok(names.includes("get_stl_info"));
   assert.ok(names.includes("blender_mcp_edit_model"));
@@ -164,6 +166,36 @@ test("Bambu Connect handoff builds the official encoded import URL without openi
   } finally {
     fs.rmSync(filePath, { force: true });
   }
+});
+
+test("X2D native control accepts task and AMS commands but rejects unrelated device JSON", () => {
+  const pause = validateBambuNativeControlMessage(
+    JSON.stringify({ print: { command: "pause", sequence_id: "1", param: "" } })
+  );
+  assert.equal(pause.command, "pause");
+
+  const load = validateBambuNativeControlMessage(
+    JSON.stringify({ print: { command: "ams_change_filament", sequence_id: "2", ams_id: 0, slot_id: 1, target: 1 } })
+  );
+  assert.equal(load.command, "ams_change_filament");
+
+  const calibrate = validateBambuNativeControlMessage(
+    JSON.stringify({ print: { command: "gcode_line", sequence_id: "3", param: "M620 C0 \n" } })
+  );
+  assert.equal(calibrate.command, "gcode_line");
+
+  assert.throws(
+    () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "set_bed_temp", temp: 120 } })),
+    /not allowed/i
+  );
+  assert.throws(
+    () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "gcode_line", param: "M104 S300" } })),
+    /limited to AMS/i
+  );
+  assert.throws(
+    () => validateBambuNativeControlMessage(JSON.stringify({ system: { command: "reboot" } })),
+    /print command envelope/i
+  );
 });
 
 function assertBambuStudioSlicerSupport(listToolsResult) {

@@ -24,7 +24,7 @@ import {
   type SlicerType,
 } from "./stl/stl-manipulator.js";
 import { BambuNetworkBridge, type BambuNetworkBridgeOptions } from "./bambu-network-bridge.js";
-import { printWithBambuNative, uploadWithBambuNative } from "./bambu-native.js";
+import { printWithBambuNative, sendCommandWithBambuNative, uploadWithBambuNative } from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
 import {
   setFanSpeedViaOfficialBambuStudio,
@@ -2625,6 +2625,22 @@ class BambuPrinterMCPServer {
             }
           },
           {
+            name: "x2d_native_control",
+            description: "Send an allowlisted pause, resume, stop, or AMS control through the installed Bambu networking plug-in.",
+            inputSchema: {
+              type: "object",
+              properties: {
+                message_json: { type: "string", description: "Bambu print-command JSON. Only pause/resume/stop and allowlisted AMS controls are accepted." },
+                qos: { type: "number", description: "MQTT QoS used by Bambu Studio (0 or 1; default 0)." },
+                flag: { type: "number", description: "Bambu networking plug-in command flag (0 or 1; default 0)." },
+                host: { type: "string", description: "Hostname or IP of the printer (default: value from env)" },
+                bambu_serial: { type: "string", description: "Serial number (default: value from env)" },
+                bambu_token: { type: "string", description: "Access token (default: value from env)" }
+              },
+              required: ["message_json"]
+            }
+          },
+          {
             name: "clear_hms_errors",
             description: "Clear HMS or print error state on the Bambu Lab printer using the clean_print_error MQTT command.",
             inputSchema: {
@@ -3161,16 +3177,64 @@ class BambuPrinterMCPServer {
             break;
 
           case "cancel_print":
-            result = await this.bambu.cancelJob(host, bambuSerial, bambuToken);
+            if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+              result = await sendCommandWithBambuNative({
+                host,
+                serial: bambuSerial,
+                token: bambuToken,
+                messageJson: JSON.stringify({ print: { command: "stop", param: "", sequence_id: String(Date.now()) } }),
+                qos: 1,
+              });
+            } else {
+              result = await this.bambu.cancelJob(host, bambuSerial, bambuToken);
+            }
             break;
 
           case "pause_print":
-            result = await this.bambu.pauseJob(host, bambuSerial, bambuToken);
+            if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+              result = await sendCommandWithBambuNative({
+                host,
+                serial: bambuSerial,
+                token: bambuToken,
+                messageJson: JSON.stringify({ print: { command: "pause", param: "", sequence_id: String(Date.now()) } }),
+                qos: 1,
+              });
+            } else {
+              result = await this.bambu.pauseJob(host, bambuSerial, bambuToken);
+            }
             break;
 
           case "resume_print":
-            result = await this.bambu.resumeJob(host, bambuSerial, bambuToken);
+            if (DEFAULT_BAMBU_MODEL === "x2d" && process.platform === "darwin") {
+              result = await sendCommandWithBambuNative({
+                host,
+                serial: bambuSerial,
+                token: bambuToken,
+                messageJson: JSON.stringify({ print: { command: "resume", param: "", sequence_id: String(Date.now()) } }),
+                qos: 1,
+              });
+            } else {
+              result = await this.bambu.resumeJob(host, bambuSerial, bambuToken);
+            }
             break;
+
+          case "x2d_native_control": {
+            if (!args?.message_json) {
+              throw new Error("Missing required parameter: message_json");
+            }
+            if (DEFAULT_BAMBU_MODEL !== "x2d") {
+              throw new Error("x2d_native_control is restricted to the X2D printer.");
+            }
+            result = await sendCommandWithBambuNative({
+              host,
+              serial: bambuSerial,
+              token: bambuToken,
+              messageJson: String(args.message_json),
+              qos: args?.qos === undefined ? 0 : Number(args.qos),
+              flag: args?.flag === undefined ? 0 : Number(args.flag),
+            });
+            break;
+          }
 
           case "clear_hms_errors":
             result = await this.bambu.clearHmsErrors(host, bambuSerial, bambuToken);
