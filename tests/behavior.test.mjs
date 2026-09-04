@@ -15,7 +15,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import JSZip from "jszip";
 import { hasAmsMappingInput, normalizeAmsMappingObject } from "../dist/ams-mapping.js";
 import { buildBambuConnectImportUrl } from "../dist/bambu-connect.js";
-import { uploadWithBambuNative, validateBambuNativeControlMessage } from "../dist/bambu-native.js";
+import { buildBambuNativeFanCommand, uploadWithBambuNative, validateBambuNativeControlMessage } from "../dist/bambu-native.js";
 import { analyze3MFAmsRequirements, analyze3MFPlateObjects, analyzeCollarCharm3MF } from "../dist/3mf_parser.js";
 import { BambuImplementation } from "../dist/printers/bambu.js";
 import { STLManipulator } from "../dist/stl/stl-manipulator.js";
@@ -184,6 +184,13 @@ test("X2D native control accepts task and AMS commands but rejects unrelated dev
   );
   assert.equal(calibrate.command, "gcode_line");
 
+  const fanCommand = buildBambuNativeFanCommand("right_auxiliary", 0, "fan-test");
+  const fan = validateBambuNativeControlMessage(fanCommand.messageJson);
+  assert.equal(fan.command, "set_fan");
+  assert.deepEqual(JSON.parse(fan.messageJson), {
+    print: { command: "set_fan", sequence_id: "fan-test", fan_index: 10, speed: 0 },
+  });
+
   assert.throws(
     () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "set_bed_temp", temp: 120 } })),
     /not allowed/i
@@ -195,6 +202,18 @@ test("X2D native control accepts task and AMS commands but rejects unrelated dev
   assert.throws(
     () => validateBambuNativeControlMessage(JSON.stringify({ system: { command: "reboot" } })),
     /print command envelope/i
+  );
+  assert.throws(
+    () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "set_fan", sequence_id: "1", fan_index: 0, speed: 0 } })),
+    /fan_index/i
+  );
+  assert.throws(
+    () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "set_fan", sequence_id: "1", fan_index: 1, speed: 11 } })),
+    /10% steps/i
+  );
+  assert.throws(
+    () => validateBambuNativeControlMessage(JSON.stringify({ print: { command: "set_fan", sequence_id: "1", fan_index: 1, speed: 0, gcode: "M104 S300" } })),
+    /unsupported fields/i
   );
 });
 
@@ -235,6 +254,18 @@ test("X2D public task and AMS tools dispatch through the native helper, includin
   const pause = parseJsonResult(await client.callTool({ name: "pause_print", arguments: {} }));
   assert.equal(pause.route, "bambu:///local");
   assert.equal(JSON.parse(pause.updates[0]).message.print.command, "pause");
+
+  const fanOff = parseJsonResult(
+    await client.callTool({ name: "set_fan_speed", arguments: { fan: "part", speed: 0, confirm_during_print: true } })
+  );
+  const fanMessage = JSON.parse(fanOff.updates[0]).message.print;
+  assert.equal(fanOff.route, "bambu:///local");
+  assert.equal(fanOff.fan, "part");
+  assert.equal(fanOff.fan_index, 1);
+  assert.equal(fanOff.speed, 0);
+  assert.equal(fanMessage.command, "set_fan");
+  assert.equal(fanMessage.fan_index, 1);
+  assert.equal(fanMessage.speed, 0);
 
   const drying = parseJsonResult(
     await client.callTool({ name: "set_ams_drying", arguments: { action: "stop", ams_id: 128 } })

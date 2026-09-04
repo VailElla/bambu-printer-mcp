@@ -25,6 +25,7 @@ import {
 } from "./stl/stl-manipulator.js";
 import { BambuNetworkBridge, type BambuNetworkBridgeOptions } from "./bambu-network-bridge.js";
 import {
+  buildBambuNativeFanCommand,
   printWithBambuNative,
   sendCommandWithBambuNative,
   uploadWithBambuNative,
@@ -32,7 +33,6 @@ import {
 } from "./bambu-native.js";
 import { importFileViaBambuConnect } from "./bambu-connect.js";
 import {
-  setFanSpeedViaOfficialBambuStudio,
   setTemperatureViaOfficialBambuStudio,
 } from "./bambu-studio-control.js";
 import { hasAmsMappingInput, normalizeAmsMappingObject, normalizeBridgeAmsTrayValue } from "./ams-mapping.js";
@@ -3356,7 +3356,19 @@ class BambuPrinterMCPServer {
               if (printerState === "RUNNING" && args?.confirm_during_print !== true) {
                 throw new Error("The X2D is currently printing. Re-submit with confirm_during_print=true after explicit user confirmation.");
               }
-              result = await setFanSpeedViaOfficialBambuStudio(String(args.fan), Number(args.speed));
+              const fanCommand = buildBambuNativeFanCommand(String(args.fan), Number(args.speed));
+              result = {
+                ...await sendCommandWithBambuNative({
+                  host,
+                  serial: bambuSerial,
+                  token: bambuToken,
+                  messageJson: fanCommand.messageJson,
+                }),
+                fan: fanCommand.fan,
+                fan_index: fanCommand.fanIndex,
+                requested_speed: fanCommand.requestedSpeed,
+                speed: fanCommand.speed,
+              };
             } else {
               result = await this.bambu.setFanSpeed(
                 host,

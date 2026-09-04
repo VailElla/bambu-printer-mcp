@@ -28,6 +28,14 @@ export type BambuNativeControlOptions = {
     flag?: number;
 };
 export type BambuNativeUpdateCallback = (line: string) => void;
+export type BambuNativeFanCommand = {
+    fan: "part" | "auxiliary" | "right_auxiliary" | "chamber";
+    fanIndex: 1 | 2 | 3 | 10;
+    requestedSpeed: number;
+    speed: number;
+    messageJson: string;
+};
+export declare function buildBambuNativeFanCommand(fan: string | number, speed: number, sequenceId?: string): BambuNativeFanCommand;
 export declare function validateBambuNativeControlMessage(messageJson: string): {
     messageJson: string;
     command: string;

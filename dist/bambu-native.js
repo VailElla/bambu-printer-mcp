@@ -100,6 +100,40 @@ const X2D_NATIVE_PRINT_COMMANDS = new Set([
     "ams_filament_drying",
     "auto_stop_ams_dry",
 ]);
+export function buildBambuNativeFanCommand(fan, speed, sequenceId = String(Date.now())) {
+    const normalized = String(fan).trim().toLowerCase();
+    const fanConfig = normalized === "1" || normalized === "part" || normalized === "part_cooling"
+        ? { fan: "part", fanIndex: 1 }
+        : normalized === "2" || normalized === "aux" || normalized === "auxiliary" || normalized === "left_auxiliary"
+            ? { fan: "auxiliary", fanIndex: 2 }
+            : normalized === "10" || normalized === "right_aux" || normalized === "right_auxiliary"
+                ? { fan: "right_auxiliary", fanIndex: 10 }
+                : normalized === "3" || normalized === "chamber" || normalized === "exhaust"
+                    ? { fan: "chamber", fanIndex: 3 }
+                    : undefined;
+    if (!fanConfig) {
+        throw new Error("Unsupported X2D fan. Use part, auxiliary, right_auxiliary, chamber, 1, 2, 3, or 10.");
+    }
+    if (!Number.isFinite(speed) || speed < 0 || speed > 100) {
+        throw new Error("Fan speed must be between 0 and 100 percent.");
+    }
+    // Preserve the public tool's existing 10% step semantics while sending the
+    // command through the signed native network plug-in instead of UI scripting.
+    const roundedSpeed = Math.round(speed / 10) * 10;
+    return {
+        ...fanConfig,
+        requestedSpeed: speed,
+        speed: roundedSpeed,
+        messageJson: JSON.stringify({
+            print: {
+                command: "set_fan",
+                sequence_id: sequenceId,
+                fan_index: fanConfig.fanIndex,
+                speed: roundedSpeed,
+            },
+        }),
+    };
+}
 export function validateBambuNativeControlMessage(messageJson) {
     let parsed;
     try {
@@ -118,6 +152,22 @@ export function validateBambuNativeControlMessage(messageJson) {
     const print = envelope.print;
     const command = typeof print.command === "string" ? print.command : "";
     if (X2D_NATIVE_PRINT_COMMANDS.has(command)) {
+        return { messageJson: JSON.stringify(parsed), command };
+    }
+    if (command === "set_fan") {
+        const allowedKeys = new Set(["command", "sequence_id", "fan_index", "speed"]);
+        if (Object.keys(print).some((key) => !allowedKeys.has(key))) {
+            throw new Error("X2D native set_fan contains unsupported fields.");
+        }
+        if (typeof print.sequence_id !== "string" || print.sequence_id.length === 0) {
+            throw new Error("X2D native set_fan requires a sequence_id string.");
+        }
+        if (![1, 2, 3, 10].includes(Number(print.fan_index)) || !Number.isInteger(print.fan_index)) {
+            throw new Error("X2D native set_fan fan_index must be 1, 2, 3, or 10.");
+        }
+        if (!Number.isInteger(print.speed) || Number(print.speed) < 0 || Number(print.speed) > 100 || Number(print.speed) % 10 !== 0) {
+            throw new Error("X2D native set_fan speed must be an integer from 0 to 100 in 10% steps.");
+        }
         return { messageJson: JSON.stringify(parsed), command };
     }
     if (command === "print_option") {
